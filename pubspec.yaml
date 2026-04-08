@@ -1,0 +1,50 @@
+name: retropal
+description: "RetroPal - Your retro gaming companion. A GBA/GB/GBC emulator powered by mGBA."
+publish_to: 'none'
+version: 17.0.0+17
+
+environment:
+  sdk: ">=3.9.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  ffi: ^2.2.0
+  path_provider: ^2.1.4
+  file_picker: ^10.3.10
+  shared_preferences: ^2.5.4
+  sqflite: ^2.4.2
+  sqflite_common_ffi: ^2.3.4+4
+  provider: ^6.1.2
+  path: ^1.9.0
+  collection: ^1.18.0
+  http: ^1.2.2
+  wakelock_plus: ^1.2.8
+  archive: ^4.0.9
+  share_plus: ^10.1.4
+  google_sign_in: ^6.2.2
+  googleapis: ^13.2.0
+  extension_google_sign_in_as_googleapis_auth: ^2.0.13
+  firebase_core: ^4.4.0
+  firebase_analytics: ^12.1.2
+  firebase_crashlytics: ^5.0.7
+  google_mobile_ads: ^7.0.0
+  flutter_secure_storage: ^9.2.4
+  crypto: ^3.0.6
+  cached_network_image: ^3.4.1
+  url_launcher: ^6.3.2
+  package_info_plus: ^9.0.0
+  in_app_purchase: ^3.2.0
+  in_app_purchase_android: ^0.4.0+1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  ffigen: ^11.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/app_icon.png
+    - native/mupen64plus.ini

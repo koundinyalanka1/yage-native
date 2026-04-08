@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android TV Leanback banner: 320×180 dp
+     Displayed in the TV home screen app row. For best results across all
+     TV launchers, replace this with a real 320×180 px PNG in drawable-xhdpi
+     (640×360 px) that includes the app name.
+     This XML layer-list works on stock Android TV and Google TV launchers. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Gradient background for visual polish -->
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:startColor="#7B4FEC"
+                android:endColor="#5028C6"
+                android:angle="135"/>
+        </shape>
+    </item>
+
+    <!-- App icon — centred, large enough to be recognisable on TV -->
+    <item
+        android:gravity="center"
+        android:width="130dp"
+        android:height="130dp"
+        android:drawable="@drawable/tv_icon_source"/>
+</layer-list>

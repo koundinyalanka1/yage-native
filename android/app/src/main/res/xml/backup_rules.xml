@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android Auto Backup rules (Android 6–11).
+  Backs up save files (.sav), save states (.ss*), settings, and RA cache
+  so they survive uninstalls and device transfers.
+  Max 25 MB via the user's Google account — no user action needed.
+-->
+<full-backup-content>
+    <!-- App-internal saves directory: .sav, save states, screenshots -->
+    <include domain="file" path="saves/" />
+
+    <!-- Settings (SharedPreferences) -->
+    <include domain="sharedpref" path="." />
+
+    <!-- RA achievement cache -->
+    <include domain="file" path="ra_cache/" />
+</full-backup-content>

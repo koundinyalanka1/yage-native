@@ -1,0 +1,190 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    
+    <!-- Internet for downloading artwork -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    
+    <!-- Storage: READ only for legacy (Android ≤12). TV uses MediaStore (no MANAGE_EXTERNAL_STORAGE). -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" 
+        android:maxSdkVersion="32"/>
+    
+    <!-- Keep screen on while playing -->
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+
+    <uses-permission android:name="com.android.vending.BILLING" />
+    
+    <!-- Vibration for haptic feedback -->
+    <uses-permission android:name="android.permission.VIBRATE"/>
+
+    <!-- ═══ Android TV support ═══ -->
+    <!-- Touchscreen is NOT required — allows install on TV devices -->
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false"/>
+
+    <!-- Declare Leanback support (optional — app works on both phone and TV) -->
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="false"/>
+
+    <!-- Gamepad support (optional — Bluetooth/USB controllers work when present) -->
+    <uses-feature
+        android:name="android.hardware.gamepad"
+        android:required="false"/>
+    
+    <application
+        android:label="RetroPal"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:banner="@drawable/tv_banner"
+        android:appCategory="game"
+        android:isGame="true"
+        android:allowBackup="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules">
+        
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:banner="@drawable/tv_banner"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <!-- Android TV launcher entry -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER"/>
+            </intent-filter>
+
+            <!-- Open ROM files directly -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="file"/>
+                <data android:scheme="content"/>
+                <data android:pathPattern=".*\\.gba"/>
+                <data android:pathPattern=".*\\.gb"/>
+                <data android:pathPattern=".*\\.gbc"/>
+                <data android:pathPattern=".*\\.nes"/>
+                <data android:pathPattern=".*\\.sfc"/>
+                <data android:pathPattern=".*\\.smc"/>
+                <data android:pathPattern=".*\\.sms"/>
+                <data android:pathPattern=".*\\.gg"/>
+                <data android:pathPattern=".*\\.md"/>
+                <data android:pathPattern=".*\\.gen"/>
+                <data android:pathPattern=".*\\.bin"/>
+                <data android:pathPattern=".*\\.pce"/>
+                <data android:pathPattern=".*\\.sgx"/>
+                <data android:pathPattern=".*\\.cue"/>
+                <data android:pathPattern=".*\\.chd"/>
+                <data android:pathPattern=".*\\.zip"/>
+                <data android:pathPattern=".*\\.GBA"/>
+                <data android:pathPattern=".*\\.GB"/>
+                <data android:pathPattern=".*\\.GBC"/>
+                <data android:pathPattern=".*\\.NES"/>
+                <data android:pathPattern=".*\\.SFC"/>
+                <data android:pathPattern=".*\\.SMC"/>
+                <data android:pathPattern=".*\\.SMS"/>
+                <data android:pathPattern=".*\\.GG"/>
+                <data android:pathPattern=".*\\.MD"/>
+                <data android:pathPattern=".*\\.GEN"/>
+                <data android:pathPattern=".*\\.BIN"/>
+                <data android:pathPattern=".*\\.PCE"/>
+                <data android:pathPattern=".*\\.SGX"/>
+                <data android:pathPattern=".*\\.CUE"/>
+                <data android:pathPattern=".*\\.CHD"/>
+                <data android:pathPattern=".*\\.ZIP"/>
+            </intent-filter>
+            <!-- Fallback for file managers that use host/path matching -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:scheme="file"/>
+                <data android:host="*"/>
+                <data android:pathPattern=".*\\.gba"/>
+                <data android:pathPattern=".*\\.gb"/>
+                <data android:pathPattern=".*\\.gbc"/>
+                <data android:pathPattern=".*\\.nes"/>
+                <data android:pathPattern=".*\\.sfc"/>
+                <data android:pathPattern=".*\\.smc"/>
+                <data android:pathPattern=".*\\.sms"/>
+                <data android:pathPattern=".*\\.gg"/>
+                <data android:pathPattern=".*\\.md"/>
+                <data android:pathPattern=".*\\.gen"/>
+                <data android:pathPattern=".*\\.bin"/>
+                <data android:pathPattern=".*\\.pce"/>
+                <data android:pathPattern=".*\\.sgx"/>
+                <data android:pathPattern=".*\\.cue"/>
+                <data android:pathPattern=".*\\.chd"/>
+                <data android:pathPattern=".*\\.zip"/>
+            </intent-filter>
+        </activity>
+        
+        <!-- File picker provider -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths"/>
+        </provider>
+        
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+            
+
+
+        <!-- AdMob App ID (replace with your real ID for production) -->
+        <meta-data
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="ca-app-pub-2596031675923197~8848306073"/>
+
+        <!-- Game mode config for low-latency / controller support (Android 12+) -->
+        <meta-data
+            android:name="android.app.game_mode_config"
+            android:resource="@xml/game_mode_config" />
+    </application>
+
+    <!-- Required for file picker on Android 11+ -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.OPEN_DOCUMENT"/>
+            <data android:mimeType="*/*"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.GET_CONTENT"/>
+            <data android:mimeType="*/*"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.OPEN_DOCUMENT_TREE"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+        <!-- Let url_launcher / Custom Tabs resolve https handlers on Android 11+ -->
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="https"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="http"/>
+        </intent>
+    </queries>
+</manifest>
