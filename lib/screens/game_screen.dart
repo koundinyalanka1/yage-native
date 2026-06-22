@@ -11,6 +11,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../core/mgba_bindings.dart';
 import '../core/rcheevos_bindings.dart';
+import '../models/emulator_settings.dart';
 import '../models/game_rom.dart';
 import '../models/gamepad_layout.dart';
 import '../models/ra_achievement.dart';
@@ -22,6 +23,7 @@ import '../services/ra_runtime_service.dart';
 import '../services/rcheevos_client.dart';
 import '../services/ad_service.dart';
 import '../services/retro_achievements_service.dart';
+import '../services/bios_service.dart';
 import '../services/settings_service.dart';
 import '../services/cheat_session.dart';
 import '../services/gamepad_input.dart';
@@ -33,6 +35,7 @@ import '../widgets/tv_focusable.dart';
 import '../widgets/virtual_gamepad.dart';
 import '../utils/theme.dart';
 
+/// Game playing screen - optimized for mobile
 class GameScreen extends StatefulWidget {
   final GameRom game;
 
@@ -47,21 +50,40 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
   bool _showMenu = false;
   bool _isLandscape = false;
   bool _editingLayout = false;
-  GamepadLayout? _tempLayout; 
+  bool _ndsTouchActive = false;
+  GamepadLayout? _tempLayout; // Temporary layout while editing
 
+  /// True when controls were hidden automatically by gamepad detection
+  /// (not by the user choosing "Hide Controls" in the menu).
+  /// Used to auto-restore controls when the gamepad disconnects.
   bool _controllerAutoHidden = false;
+
+  // Use a key to preserve GameDisplay state across orientation changes
   final _gameDisplayKey = GlobalKey();
+
+  // External gamepad / keyboard input
   late final GamepadMapper _gamepadMapper = GamepadMapper(
     mapping: GamepadMapper.mappingForPlatform(widget.game.platform),
   );
   final FocusNode _focusNode = FocusNode();
   int _virtualKeys = 0;
   int _physicalKeys = 0;
+
+  // ── Hotkey combo system ──
+  // Hold Select, then press another button for shortcut actions.
+  // Releasing Select without a combo sends a normal GBA Select tap.
   bool _hotkeyHeld = false;
   bool _hotkeyComboUsed = false;
+
+  // ── RetroAchievements notification tracking ──
   bool _hasShownAchievementNotification = false;
   RAGameData? _lastGameData;
   OverlayEntry? _raToastEntry;
+  String? _lastRequestedRcheevosHash;
+
+  // ── Saved references for safe disposal ──
+  // Provider lookups are unsafe in dispose(), so we capture these early
+  // and reuse them everywhere instead of calling context.read<>().
   EmulatorService? _emulatorRef;
   LinkCableService? _linkCableRef;
   RetroAchievementsService? _raServiceRef;
@@ -70,23 +92,37 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
   StreamSubscription<RcEvent>? _rcheevosEventSub;
   SettingsService? _settingsServiceRef;
   GameLibraryService? _libraryRef;
+  BiosService? _biosServiceRef;
 
+  /// Cheat session — manages user-entered cheat codes for this game.
   late final CheatSession _cheatSession;
 
+  /// Preloaded interstitial for exit. Shown when user confirms exit.
   InterstitialAd? _interstitialAd;
 
+  /// Whether the 30-minute threshold was reached (for reset logic).
   bool _thirtyMinuteAdShown = false;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+
+    // Start session tracking for ad timing
     AdService.instance.startSession();
+
+    // On Android TV, hide virtual controls by default
     if (TvDetector.isTV) {
       _showControls = false;
     }
+
+    // Keep screen awake while playing
     WakelockPlus.enable();
+
+    // Hide system UI for immersive gaming
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+
+    // On TV, lock to landscape; on mobile allow all orientations
     if (TvDetector.isTV) {
       SystemChrome.setPreferredOrientations([
         DeviceOrientation.landscapeLeft,
@@ -100,7 +136,14 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
         DeviceOrientation.landscapeRight,
       ]);
     }
+
+    // Start emulation, then show shortcuts help on first launch
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      // If the screen was popped before the first frame (fast back-press,
+      // launch error), the Element is defunct and context.read would throw.
+      if (!mounted) return;
+      // Capture provider references early so they are available in dispose()
+      // where context.read() is unsafe (widget tree may already be torn down).
       _emulatorRef = context.read<EmulatorService>();
       _linkCableRef = context.read<LinkCableService>();
       _rcheevosClientRef = context.read<RcheevosClient>();
@@ -108,22 +151,53 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
       _libraryRef = context.read<GameLibraryService>();
 
       final emulator = _emulatorRef!;
+      // Wire link cable service to emulator
       emulator.linkCable = _linkCableRef;
+      // Wire native rcheevos client for per-frame achievement processing
       emulator.rcheevosClient = _rcheevosClientRef;
+
+      // Start cheat session for this game (persisted via SQLite)
       final gameDb = context.read<GameDatabase>();
       _cheatSession = CheatSession(emulator, gameDb);
       _cheatSession.startSession(widget.game.path);
+
+      // Capture SettingsService early — _maybeShowShortcutsHelp() and
+      // _detectRetroAchievements() both read _settingsServiceRef!.
       _settingsServiceRef = context.read<SettingsService>();
       _settingsServiceRef!.addListener(_onSettingsChanged);
+      // Apply initial settings immediately
       emulator.updateSettings(_settingsServiceRef!.settings);
 
       emulator.start();
-      _syncKeys(); 
+      _syncKeys(); // Ensure keys are synced on load (clear stale state)
       _maybeShowShortcutsHelp();
+
+      // Show BIOS/HLE mode toast for NDS games
+      if (widget.game.platform == GamePlatform.nds) {
+        Future.delayed(const Duration(milliseconds: 500), () {
+          if (!mounted) return;
+          _showNdsBiosToast(usingHle: emulator.isHleMode);
+        });
+      }
+
+      // Listen for BIOS file changes while mid-game (e.g. user adds/removes
+      // BIOS files from Settings and returns without relaunching the game).
+      _biosServiceRef = context.read<BiosService>();
+      _biosServiceRef!.addListener(_onBiosChanged);
+
+      // Capture RetroAchievements service early — _detectRetroAchievements()
+      // reads _raServiceRef!.
       _raServiceRef = context.read<RetroAchievementsService>();
       _raServiceRef!.addListener(_onRetroAchievementsChanged);
-      _detectRetroAchievements();
+
+      // Listen for native rcheevos events (achievement unlocks, etc.)
       _rcheevosEventSub = _rcheevosClientRef!.events.listen(_onRcheevosEvent);
+
+      // Detect RetroAchievements game ID in the background.
+      // This does NOT block gameplay — achievements are enabled async.
+      _detectRetroAchievements();
+
+      // Preload exit interstitial (mobile + TV, not during gameplay)
       if (AdService.instance.isAvailable) {
         _loadExitInterstitial();
       }
@@ -143,6 +217,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
               onAdDismissedFullScreenContent: (ad) {
                 ad.dispose();
                 _interstitialAd = null;
+                // Reset counters based on whether this was a 30-min forced ad
                 if (_thirtyMinuteAdShown) {
                   AdService.instance.resetAll();
                 } else {
@@ -164,20 +239,29 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
         ),
       );
     } catch (e) {
+      // Don't crash if ad loading fails
       debugPrint('InterstitialAd: exception during load — $e');
     }
   }
 
+  /// Exit with interstitial ad, using simplified logic:
+  ///   - Under 30 mins cumulative play: show ad every 3rd exit.
+  ///   - 30+ mins cumulative play: show ad immediately, reset all counters.
   void _onExitWithAd() {
+    // End session to update cumulative time
     AdService.instance.endSession();
+
+    // Check if we should show an ad
     if (_interstitialAd != null && AdService.instance.shouldShowExitAd()) {
+      // Track if this is a 30-minute forced ad for reset logic
       _thirtyMinuteAdShown = AdService.instance.shouldShowTimeBasedAd();
 
       try {
         _interstitialAd!.show();
-        _interstitialAd = null; 
+        _interstitialAd = null; // disposed in callback → calls _exitGame
         return;
       } catch (e) {
+        // Don't crash if ad fails to show
         debugPrint('InterstitialAd: exception during show — $e');
         _interstitialAd?.dispose();
         _interstitialAd = null;
@@ -187,6 +271,50 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     _exitGame();
   }
 
+  /// Shows the NDS BIOS/HLE status toast.  Extracted so both the initial
+  /// launch toast and the live [_onBiosChanged] listener can reuse it.
+  void _showNdsBiosToast({required bool usingHle}) {
+    // On TV, HLE is not a valid state (gate blocks launch without BIOS).
+    // Guard here so a hypothetical edge-case never shows a misleading toast.
+    if (usingHle && TvDetector.isTV) return;
+    if (usingHle) {
+      _showRAToast(
+        title: 'Using FreeBIOS (no BIOS files)',
+        subtitle: 'A few games (e.g. Pokémon) may show a "communication '
+            'error" when loading a save. Add real bios7/bios9/firmware in '
+            'Settings → BIOS for full save compatibility.',
+        icon: Icons.info_outline,
+        accentColor: Colors.orange,
+        duration: const Duration(seconds: 6),
+      );
+    } else {
+      _showRAToast(
+        title: 'BIOS files detected',
+        subtitle: 'Using real NDS BIOS',
+        icon: Icons.verified_outlined,
+        accentColor: Colors.green,
+        duration: const Duration(seconds: 3),
+      );
+    }
+  }
+
+  /// Called when [BiosService] notifies (e.g. user adds/removes BIOS files
+  /// from Settings while the game screen is still on the stack).  Re-checks
+  /// current BIOS availability and shows an updated toast for NDS games.
+  void _onBiosChanged() {
+    if (!mounted) return;
+    if (widget.game.platform != GamePlatform.nds) return;
+    _biosServiceRef!.hasUserRealBios(GamePlatform.nds).then((hasReal) {
+      if (!mounted) return;
+      _showNdsBiosToast(usingHle: !hasReal);
+    });
+  }
+
+  /// Show a styled toast banner at the top of the screen with an optional
+  /// image (e.g. game icon or badge) and description text.
+  ///
+  /// Automatically dismisses after [duration].  If another toast is already
+  /// showing it is replaced immediately.
   void _showRAToast({
     required String title,
     String? subtitle,
@@ -196,6 +324,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     Duration duration = const Duration(seconds: 4),
   }) {
     if (!mounted) return;
+    // Remove existing toast if any
     _raToastEntry?.remove();
     _raToastEntry = null;
 
@@ -221,21 +350,33 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     overlay.insert(entry);
   }
 
+  /// Called when SettingsService changes.  Pushes the new settings to the
+  /// emulator service outside of build() so that any resulting
+  /// notifyListeners() calls don't trigger an infinite rebuild loop.
   void _onSettingsChanged() {
     if (!mounted) return;
     _emulatorRef!.updateSettings(_settingsServiceRef!.settings);
   }
 
+  /// Called when RetroAchievementsService state changes.
+  /// Shows the "X / Y achievements" in-app toast when data finishes loading.
   void _onRetroAchievementsChanged() {
     if (!mounted) return;
 
     final raService = _raServiceRef!;
     final gameData = raService.gameData;
     final session = raService.activeSession;
+
+    // Only show notification once per session, when data becomes available.
+    // The gameData must belong to the ACTIVE session — during a session
+    // switch the service may briefly still hold the previous game's data,
+    // and showing it here was the "previous game's notification pops up in
+    // the next game" bug.
     if (gameData != null &&
         gameData != _lastGameData &&
         session != null &&
         session.gameId > 0 &&
+        gameData.gameId == session.gameId &&
         gameData.achievements.isNotEmpty &&
         !_hasShownAchievementNotification) {
       _lastGameData = gameData;
@@ -254,15 +395,19 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// Handle events from the native rcheevos client.
   void _onRcheevosEvent(RcEvent event) {
     if (!mounted) return;
     final colors = AppColorTheme.of(context);
 
     switch (event.type) {
       case RcEventType.achievementTriggered:
+        // Check if this achievement was already earned (re-achieved via encore)
         final isReachieved =
             _raServiceRef?.gameData?.achievements.any(
-              (a) => a.id == event.achievementId && a.isEarned,
+              (a) =>
+                  a.id == event.achievementId &&
+                  (a.isEarned || a.isEarnedHardcore),
             ) ??
             false;
 
@@ -282,6 +427,16 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
               : colors.accent,
           duration: const Duration(seconds: 5),
         );
+
+        // Immediately mark the achievement as earned in local state so the
+        // achievements list reflects the unlock without waiting for the
+        // next API refresh cycle.
+        if (!isReachieved) {
+          _raServiceRef?.markAchievementEarned(
+            event.achievementId,
+            hardcore: _rcheevosClientRef?.isHardcoreEnabled ?? false,
+          );
+        }
         break;
 
       case RcEventType.gameCompleted:
@@ -295,6 +450,8 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
         break;
 
       case RcEventType.gameLoadSuccess:
+        // Update achievement count display — only if the Dart-side
+        // RetroAchievementsService hasn't already shown the same toast.
         final client = _rcheevosClientRef;
         if (client != null && !_hasShownAchievementNotification) {
           final summary = client.getAchievementSummary();
@@ -313,10 +470,12 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
 
       case RcEventType.gameLoadFailed:
         debugPrint('RcheevosClient: Game load failed: ${event.errorMessage}');
+        _lastRequestedRcheevosHash = null;
         break;
 
       case RcEventType.loginSuccess:
         debugPrint('RcheevosClient: Login successful');
+        // Now load the game if we have a pending hash
         _onRcheevosLoginSuccess();
         break;
 
@@ -329,14 +488,30 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// After native rcheevos login succeeds, load the game.
   void _onRcheevosLoginSuccess() {
     if (!mounted) return;
     final raService = _raServiceRef;
     if (raService == null) return;
 
     final session = raService.activeSession;
-    if (session != null && session.romHash.isNotEmpty) {
-      _rcheevosClientRef?.beginLoadGame(session.romHash);
+    // Only load the achievement set if the session belongs to THIS game —
+    // never feed a stale session's hash to the native client.
+    if (session != null &&
+        session.romHash.isNotEmpty &&
+        session.romPath == widget.game.path) {
+      final client = _rcheevosClientRef;
+      if (client == null || !client.isInitialized) return;
+
+      final settings = _settingsServiceRef?.settings;
+      if (settings != null) {
+        client.setHardcoreEnabled(settings.raHardcoreMode);
+      }
+      client.setEncoreEnabled(true);
+
+      if (_lastRequestedRcheevosHash == session.romHash) return;
+      _lastRequestedRcheevosHash = session.romHash;
+      client.beginLoadGame(session.romHash);
     }
   }
 
@@ -354,12 +529,17 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
   void dispose() {
     try {
       WidgetsBinding.instance.removeObserver(this);
+      // Remove RA listeners (using saved references — safe in dispose)
       _settingsServiceRef?.removeListener(_onSettingsChanged);
       _settingsServiceRef = null;
       _raServiceRef?.removeListener(_onRetroAchievementsChanged);
       _raServiceRef = null;
+      _biosServiceRef?.removeListener(_onBiosChanged);
+      _biosServiceRef = null;
       _rcheevosEventSub?.cancel();
       _rcheevosEventSub = null;
+      // Remove any lingering RA toast.  Wrapped in try-catch because the
+      // overlay entry may have been removed already by its own animation.
       try {
         _raToastEntry?.remove();
       } catch (e) {
@@ -367,11 +547,21 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
       }
       _raToastEntry = null;
       _focusNode.dispose();
+
+      // End cheat session (clears native cheats)
       _cheatSession.endSession();
       _cheatSession.dispose();
+
+      // Disconnect link cable and clean up emulator references
+      // Uses saved refs — context.read() is unsafe in dispose().
       _linkCableRef?.disconnect();
       _emulatorRef?.linkCable = null;
       _emulatorRef?.rcheevosClient = null;
+
+      // Fully shut down the native rcheevos client so it re-initialises
+      // cleanly when the user enters a game again.  Without this, the
+      // singleton stays in _initialized=true / _gameLoaded=false limbo
+      // and the next session never loads the game → no achievement events.
       _rcheevosClientRef?.shutdown(notify: false);
       _rcheevosClientRef = null;
 
@@ -382,8 +572,12 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
 
       _interstitialAd?.dispose();
       _interstitialAd = null;
+
+      // Allow screen to sleep again
       WakelockPlus.disable();
     } finally {
+      // System-level cleanup runs even if earlier dispose steps throw,
+      // so orientation / system-UI changes never leak to other screens.
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
       SystemChrome.setPreferredOrientations([
         DeviceOrientation.portraitUp,
@@ -401,13 +595,29 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     if (!mounted || _emulatorRef == null) return;
     final emulator = _emulatorRef!;
 
-    if (state == AppLifecycleState.paused) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      // Persist the battery save (SRAM) before the OS can reclaim the
+      // backgrounded process. An in-game save only updates the core's
+      // in-memory SRAM buffer; pause() alone never writes it to disk, so a
+      // save made right before the app is swiped away / killed while in the
+      // background would otherwise be lost (reload shows "New Game").
+      //
+      // pause() stops the native frame loop synchronously, so the subsequent
+      // SRAM read in flushSramSync() does not race retro_run, and the flush
+      // completes before this callback returns (durable even if the process
+      // is killed moments later).
       emulator.pause();
+      emulator.flushSramSync();
       _flushPlayTime();
     } else if (state == AppLifecycleState.resumed) {
       if (!_showMenu) {
         emulator.start();
       }
+      // If controls were auto-hidden by gamepad detection, restore them on
+      // resume — the gamepad may have been disconnected while the app was
+      // backgrounded (e.g. Bluetooth turned off, controller powered down).
+      // Reset detection so a reconnecting gamepad is noticed again.
       if (_controllerAutoHidden && !_showControls) {
         setState(() {
           _showControls = true;
@@ -439,10 +649,12 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
       emulator.pause();
     } else {
       emulator.start();
+      // Re-request focus for gamepad input
       _focusNode.requestFocus();
     }
   }
 
+  /// Merge virtual and physical keys and push to emulator
   void _syncKeys() {
     int keys = _virtualKeys | _physicalKeys;
     if (kDebugMode && keys != 0) {
@@ -453,30 +665,48 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     _emulatorRef?.setKeys(keys);
   }
 
+  /// Called by VirtualGamepad when touch keys change
   void _onVirtualKeysChanged(int keys) {
     _virtualKeys = keys;
     _syncKeys();
   }
 
+  /// Called by VirtualGamepad when analog stick changes
   void _onVirtualAnalogChanged(double x, double y) {
     _emulatorRef?.setAnalog(x, y);
   }
 
+  /// Called by VirtualGamepad when right-stick analog helpers change.
+  void _onVirtualRightAnalogChanged(double x, double y) {
+    _emulatorRef?.setRightAnalog(x, y);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  //  Key / gamepad input handling
+  // ─────────────────────────────────────────────────────────────────────
+
+  /// The gamepad button used as the hotkey modifier.  Hold this and press
+  /// another button to trigger a shortcut.  If released without a combo,
+  /// a normal GBA Select tap is sent so in-game Select still works.
   static const _hotkeyModifier = LogicalKeyboardKey.gameButtonSelect;
 
+  /// Combo actions when [_hotkeyModifier] is held.
   static final _baseHotkeyActions = <LogicalKeyboardKey, String>{
-    LogicalKeyboardKey.gameButtonStart: 'menu', 
-    LogicalKeyboardKey.gameButtonA: 'quickSave', 
-    LogicalKeyboardKey.gameButtonB: 'quickLoad', 
+    LogicalKeyboardKey.gameButtonStart: 'menu', // Select+Start → pause menu
+    LogicalKeyboardKey.gameButtonA: 'quickSave', // Select+A     → quick save
+    LogicalKeyboardKey.gameButtonB: 'quickLoad', // Select+B     → quick load
     LogicalKeyboardKey.gameButtonRight1:
-        'fastForward', 
+        'fastForward', // Select+R1    -> fast forward
   };
 
+  /// Back / Escape — opens menu during gameplay, closes it when shown.
+  /// These are TV-remote / keyboard keys that never conflict with GBA.
   static final _backKeys = {
     LogicalKeyboardKey.escape,
     LogicalKeyboardKey.goBack,
   };
 
+  /// Keyboard-only shortcuts (no gamepad conflict).
   static final _keyboardShortcuts = <LogicalKeyboardKey, String>{
     LogicalKeyboardKey.f1: 'menu',
     LogicalKeyboardKey.f5: 'quickSave',
@@ -510,6 +740,8 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// When Select is released without triggering any combo, briefly send
+  /// a GBA Select press so the button still works for in-game menus.
   void _simulateSelectTap() {
     _physicalKeys |= GBAKey.select;
     _syncKeys();
@@ -524,21 +756,26 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
   KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
     final settings = _settingsServiceRef!.settings;
     if (!settings.enableExternalGamepad) return KeyEventResult.ignored;
+
+    // ── Hotkey modifier (Select button) ──────────────────────────────
     if (event.logicalKey == _hotkeyModifier) {
       if (event is KeyDownEvent) {
         _hotkeyHeld = true;
         _hotkeyComboUsed = false;
-        return KeyEventResult.handled; 
+        return KeyEventResult.handled; // suppress GBA Select
       }
       if (event is KeyUpEvent) {
         _hotkeyHeld = false;
         if (!_hotkeyComboUsed && !_showMenu && !_editingLayout) {
+          // No combo was triggered — treat as a normal GBA Select tap
           _simulateSelectTap();
         }
         return KeyEventResult.handled;
       }
-      return KeyEventResult.handled; 
+      return KeyEventResult.handled; // suppress repeats
     }
+
+    // ── Hotkey combos: Select + button ───────────────────────────────
     if (_hotkeyHeld && event is KeyDownEvent) {
       final action = _baseHotkeyActions[event.logicalKey];
       if (action != null) {
@@ -547,6 +784,8 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
         return KeyEventResult.handled;
       }
     }
+
+    // ── Back / Escape: open menu during gameplay, close it when shown ─
     if (event is KeyDownEvent && _backKeys.contains(event.logicalKey)) {
       if (_showMenu) {
         _toggleMenu();
@@ -559,7 +798,11 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
         return KeyEventResult.handled;
       }
     }
+
+    // ── While the pause menu is shown, let it handle its own D-pad ───
     if (_showMenu || _editingLayout) return KeyEventResult.ignored;
+
+    // ── Keyboard-only shortcuts (F1, F5, F9, Tab) ────────────────────
     if (event is KeyDownEvent) {
       final action = _keyboardShortcuts[event.logicalKey];
       if (action != null) {
@@ -567,11 +810,15 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
         return KeyEventResult.handled;
       }
     }
+
+    // ── Pass remaining keys to the GBA gamepad mapper ────────────────
     final wasDetected = _gamepadMapper.controllerDetected;
     final handled = _gamepadMapper.handleKeyEvent(event);
     if (handled) {
       _physicalKeys = _gamepadMapper.keys;
       _syncKeys();
+
+      // Auto-hide virtual gamepad the first time a real controller is detected
       if (!wasDetected && _gamepadMapper.controllerDetected && _showControls) {
         setState(() {
           _showControls = false;
@@ -594,6 +841,14 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     return KeyEventResult.ignored;
   }
 
+  /// Detect RetroAchievements game ID for the loaded ROM,
+  /// then activate the RA runtime for per-frame achievement processing.
+  ///
+  /// Skipped entirely when RetroAchievements is disabled in settings.
+  /// Runs asynchronously in the background so gameplay is never blocked.
+  /// On success, [RetroAchievementsService.activeSession] is populated
+  /// and the RA runtime is activated with mode enforcement enabled.
+  /// Shows explicit user feedback about achievement support status.
   Future<void> _detectRetroAchievements() async {
     final settings = _settingsServiceRef!.settings;
     if (!settings.raEnabled) {
@@ -610,14 +865,35 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     final raService = _raServiceRef!;
 
     if (!raService.isLoggedIn) {
+      // TODO: Uncomment once RA approval is granted
+      // _showRAToast(
+      //   title: 'Not Logged In',
+      //   subtitle: 'Log in to RetroAchievements in Settings',
+      //   icon: Icons.login,
+      //   accentColor: Colors.orange,
+      //   duration: const Duration(seconds: 3),
+      // );
       return;
     }
+
+    // Reset notification flag for new game session
     _hasShownAchievementNotification = false;
     _lastGameData = null;
+
+    // startGameSession may already have been fired from the home screen
+    // (fire-and-forget).  Calling it again is safe — hash + gameId are
+    // cached so it returns almost instantly if already resolved.  If the
+    // home-screen call is still in-flight, we just wait for it.
+    // An existing session only counts if it was created for THIS ROM.
+    // A session left over from another game (achievements browsed from
+    // the home screen, an exit path that skipped endGameSession, …) must
+    // be replaced — reusing it would load the previous game's achievement
+    // set into the native client and show its notifications in this game.
     final existingSession = raService.activeSession;
     final alreadyResolved =
         existingSession != null &&
         existingSession.gameId > 0 &&
+        existingSession.romPath == widget.game.path &&
         !raService.isResolvingGame;
     if (!alreadyResolved) {
       await raService.startGameSession(widget.game);
@@ -627,7 +903,10 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
 
     final session = raService.activeSession;
     final gameData = raService.gameData;
+
+    // Show user feedback about achievement support
     if (session == null || session.gameId <= 0) {
+      // Game not recognized by RetroAchievements
       _showRAToast(
         title: 'Not Recognized',
         subtitle: 'This ROM is not in the RetroAchievements database',
@@ -637,32 +916,56 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
       );
       return;
     }
+
+    // Game recognized — activate mode enforcement
     _raRuntimeRef!.activate(hardcoreMode: settings.raHardcoreMode);
 
     if (!mounted) return;
+
+    // ── Native rcheevos integration ──────────────────────────────────
+    // Initialize the rc_client and begin login + game load.
     final emulator = _emulatorRef!;
     final mgbaCore = emulator.core;
     final rcClient = _rcheevosClientRef;
     if (rcClient != null &&
-        rcClient.isInitialized == false &&
         mgbaCore != null &&
         mgbaCore.nativeCorePtr != null) {
-      final initialized = rcClient.initialize(mgbaCore.nativeCorePtr!);
+      var initialized = rcClient.isInitialized;
+      if (!initialized) {
+        initialized = rcClient.initialize(mgbaCore.nativeCorePtr!);
+      }
       if (initialized) {
+        // Configure mode before every game load so encore stays active for
+        // already-unlocked achievements.
         rcClient.setHardcoreEnabled(settings.raHardcoreMode);
         rcClient.setEncoreEnabled(true);
+
+        // Begin login with saved credentials — game load happens
+        // in _onRcheevosLoginSuccess when the login event arrives.
         final username = raService.username;
         final token = raService.connectToken;
         if (username != null && token != null) {
-          rcClient.beginLogin(username, token);
+          if (rcClient.isLoggedIn) {
+            _onRcheevosLoginSuccess();
+          } else {
+            rcClient.beginLogin(username, token);
+          }
         }
       }
     }
-    if (gameData != null && gameData.achievements.isNotEmpty) {
+
+    // Show achievement count feedback (top toast with game image).
+    // Guard against stale data from a previous session (see
+    // _onRetroAchievementsChanged for the matching check).
+    if (gameData != null &&
+        gameData.gameId == session.gameId &&
+        gameData.achievements.isNotEmpty) {
       final earned = gameData.achievements.where((a) => a.isEarned).length;
       final total = gameData.achievements.length;
       final points = gameData.earnedPoints;
       final totalPts = gameData.totalPoints;
+      _hasShownAchievementNotification = true;
+      _lastGameData = gameData;
       _showRAToast(
         title: gameData.title,
         subtitle: '$earned/$total achievements · $points/$totalPts pts',
@@ -671,9 +974,11 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// Flush accumulated session play time to the library
   void _flushPlayTime() {
-    final emulator = _emulatorRef!;
-    final library = _libraryRef!;
+    final emulator = _emulatorRef;
+    final library = _libraryRef;
+    if (emulator == null || library == null) return;
     final delta = emulator.flushPlayTime();
     if (delta > 0) {
       library.addPlayTime(widget.game, delta);
@@ -682,6 +987,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
 
   void _onRewindHold(bool held) {
     if (held) {
+      // Block rewind in Hardcore mode
       final blocked = _raRuntimeRef!.checkAction('rewind');
       if (blocked != null) {
         ScaffoldMessenger.of(context)
@@ -719,6 +1025,8 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// Quick-save to slot 0 and show feedback.
+  /// Blocked in Hardcore mode.
   Future<void> _doQuickSave() async {
     final blocked = _raRuntimeRef!.checkAction('saveState');
     if (blocked != null) {
@@ -750,6 +1058,8 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// Quick-load from slot 0 and show feedback.
+  /// Blocked in Hardcore mode.
   Future<void> _doQuickLoad() async {
     final blocked = _raRuntimeRef!.checkAction('loadState');
     if (blocked != null) {
@@ -781,6 +1091,9 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// Show the shortcuts help dialog once on the second game launch.
+  /// On the first launch the user should just enjoy the game; the dialog
+  /// is always available from the in-game menu anyway.
   Future<void> _maybeShowShortcutsHelp() async {
     final settingsService = _settingsServiceRef!;
     await settingsService.incrementGameLaunchCount();
@@ -789,6 +1102,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
 
     final launchCount = await settingsService.getGameLaunchCount();
     if (launchCount >= 2 && mounted) {
+      // Pause briefly so the game loads visually before the overlay appears
       await Future.delayed(const Duration(milliseconds: 600));
       if (!mounted) return;
       await _showShortcutsHelp();
@@ -796,36 +1110,51 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// Import a .sav file via file picker and load it into the game.
+  bool _filePickerActive = false;
   Future<void> _importSaveFile() async {
-    final result = await FilePicker.platform.pickFiles(
-      dialogTitle: 'Select save file',
-      type: FileType.custom,
-      allowedExtensions: ['sav'],
-    );
-    if (result == null || result.files.isEmpty) return;
+    // Guard against double-invocation — the file_picker plugin throws
+    // PlatformException(already_active) if opened while already showing.
+    if (_filePickerActive) return;
+    _filePickerActive = true;
+    try {
+      final result = await FilePicker.pickFiles(
+        dialogTitle: 'Select save file',
+        type: FileType.custom,
+        allowedExtensions: ['sav'],
+      );
+      if (result == null || result.files.isEmpty) return;
 
-    final path = result.files.single.path;
-    if (path == null || path.isEmpty) return;
+      final path = result.files.single.path;
+      if (path == null || path.isEmpty) return;
 
-    _toggleMenu();
-    final success = await _emulatorRef!.importSramFromFile(path);
-    if (!mounted) return;
+      _toggleMenu();
+      final success = await _emulatorRef!.importSramFromFile(path);
+      if (!mounted) return;
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          success
-              ? 'Save imported. Game reset with new save.'
-              : 'Failed to import save file.',
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            success
+                ? 'Save imported. Game reset with new save.'
+                : 'Failed to import save file.',
+          ),
+          duration: const Duration(seconds: 2),
         ),
-        duration: const Duration(seconds: 2),
-      ),
-    );
-    if (success) {
-      _emulatorRef!.start();
+      );
+      if (success) {
+        _emulatorRef!.start();
+      }
+    } on PlatformException catch (e) {
+      // file_picker throws 'already_active' if the picker is still showing
+      // from a prior invocation — swallow it instead of crashing.
+      debugPrint('FilePicker: ${e.code} — ${e.message}');
+    } finally {
+      _filePickerActive = false;
     }
   }
 
+  /// Display the shortcuts reference dialog.
   Future<void> _showShortcutsHelp() {
     final emulator = _emulatorRef!;
     final wasRunning = emulator.state == EmulatorState.running;
@@ -834,7 +1163,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     return showDialog(
       context: context,
       barrierDismissible: true,
-      builder: (_) => const _ShortcutsHelpDialog(),
+      builder: (_) => _ShortcutsHelpDialog(platform: widget.game.platform),
     ).then((_) {
       if (mounted && wasRunning && !_showMenu) {
         emulator.start();
@@ -846,11 +1175,19 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
   Future<void> _exitGame() async {
     _flushPlayTime();
     _cheatSession.endSession();
-    await _emulatorRef!.stop();
-    if (!mounted) return;
+
+    // Await stop so the SRAM save completes before we tear down the screen.
+    await _emulatorRef?.stop();
+
+    // Deactivate the RA runtime and end the session.  This must happen
+    // even if the widget was unmounted during the await above — neither
+    // call needs the BuildContext, and skipping them leaves a stale RA
+    // session/gameData behind that the NEXT game would pick up (wrong
+    // title toast + wrong achievement set loaded into the native client).
     _raRuntimeRef?.deactivate();
     _raServiceRef?.endGameSession();
 
+    if (!mounted) return;
     Navigator.of(context).pop();
   }
 
@@ -858,6 +1195,8 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     final colors = AppColorTheme.of(context);
     final emulator = _emulatorRef!;
     final wasRunning = emulator.state == EmulatorState.running;
+
+    // Pause while showing dialog
     if (wasRunning) {
       emulator.pause();
     }
@@ -925,9 +1264,11 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
       _onExitWithAd();
       return true;
     } else {
+      // Resume if was running
       if (wasRunning && !_showMenu) {
         emulator.start();
       }
+      // Restore focus so gamepad/keyboard input resumes on TV
       if (mounted) _focusNode.requestFocus();
       return false;
     }
@@ -950,14 +1291,17 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
         isSupported: emulator.isLinkSupported,
       ),
     ).then((_) {
+      // Restore focus so gamepad/keyboard input resumes on TV
       if (mounted) _focusNode.requestFocus();
     });
   }
 
   void _toggleOrientation() {
     if (_isLandscape) {
+      // Switch to portrait and lock it
       SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     } else {
+      // Switch to landscape and lock it
       SystemChrome.setPreferredOrientations([
         DeviceOrientation.landscapeLeft,
         DeviceOrientation.landscapeRight,
@@ -970,11 +1314,16 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     final colors = AppColorTheme.of(context);
     final emulator = context.watch<EmulatorService>();
     final settings = context.watch<SettingsService>().settings;
+
+    // Create the game display.
     final Widget gameDisplay = GameDisplay(
       key: _gameDisplayKey,
       emulator: emulator,
       maintainAspectRatio: settings.maintainAspectRatio,
-      enableFiltering: settings.enableFiltering,
+      // Combines the legacy Smooth Scaling toggle with the Pixel graphics
+      // quality mode — false means pixel-perfect integer scaling.
+      enableFiltering: settings.smoothScalingEnabled,
+      enableNdsTouchOverlay: widget.game.platform != GamePlatform.nds,
     );
     final Widget layoutDisplay = gameDisplay;
 
@@ -992,30 +1341,55 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
           backgroundColor: Colors.black,
           body: OrientationBuilder(
             builder: (context, orientation) {
-              _isLandscape = orientation == Orientation.landscape;
+              final newLandscape = orientation == Orientation.landscape;
+              // NDS: flip the melonDS screen layout when orientation changes
+              // so the two DS screens reflow Top/Bottom in portrait and
+              // Left/Right (side-by-side) in landscape.
+              if (newLandscape != _isLandscape &&
+                  widget.game.platform == GamePlatform.nds) {
+                emulator.setCoreOption(
+                  'melonds_screen_layout',
+                  newLandscape ? 'Left/Right' : 'Top/Bottom',
+                );
+              }
+              _isLandscape = newLandscape;
+
+              // ── Proportional HUD metrics ──
+              // All HUD element sizes & positions are derived from screen
+              // dimensions so the layout scales across phones and tablets.
               final sw = MediaQuery.of(context).size.width;
               final sh = MediaQuery.of(context).size.height;
               final safeTop = MediaQuery.of(context).padding.top;
               final safeBottom = MediaQuery.of(context).padding.bottom;
+              // In landscape for GBA (wide aspect ratio), shrink HUD buttons
+              // so they don't eat into the already-narrow side zones.
               final bool isGbaLandscape =
                   _isLandscape && widget.game.platform == GamePlatform.gba;
               final hudBtn = isGbaLandscape
                   ? (sw * 0.082).clamp(
                       30.0,
                       44.0,
-                    ) 
-                  : (sw * 0.107).clamp(36.0, 56.0); 
-              final hudEdge = sw * 0.02; 
-              final hudGap = sw * 0.03; 
-              final hudTop = safeTop + sh * 0.005; 
-              final hudStep = hudBtn + hudGap; 
+                    ) // ~23% smaller for GBA landscape
+                  : (sw * 0.107).clamp(36.0, 56.0); // normal size
+              final hudEdge = sw * 0.02; // edge margin
+              final hudGap = sw * 0.03; // gap between btns
+              final hudTop = safeTop + sh * 0.005; // top offset
+              final hudStep = hudBtn + hudGap; // one btn + gap
 
               return Stack(
                 children: [
+                  // Background — solid black for clear button visibility
                   Container(color: Colors.black),
+
+                  // Main content - different layout for portrait vs landscape
+                  // No SafeArea for either - maximize game display
                   _isLandscape
                       ? _buildLandscapeLayout(emulator, settings, layoutDisplay)
                       : _buildPortraitLayout(emulator, settings, layoutDisplay),
+
+                  // Tap-to-restore layer: when controls were auto-hidden by
+                  // gamepad detection, a screen tap restores touch controls
+                  // (the gamepad may have been disconnected).
                   if (_controllerAutoHidden && !_showControls && !_showMenu)
                     Positioned.fill(
                       child: GestureDetector(
@@ -1037,15 +1411,20 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                         },
                       ),
                     ),
+
+                  // FPS overlay — scoped Selector so 500ms FPS ticks
+                  // don't rebuild the entire game screen widget tree.
                   if (settings.showFps)
                     Positioned(
                       top: hudTop,
                       right: hudEdge + hudStep,
                       child: Selector<EmulatorService, double>(
                         selector: (_, e) => e.currentFps,
-                        builder: (_, fps, __) => FpsOverlay(fps: fps),
+                        builder: (_, fps, _) => FpsOverlay(fps: fps),
                       ),
                     ),
+
+                  // Link cable connection indicator
                   if (context.watch<LinkCableService>().state ==
                       LinkCableState.connected)
                     Positioned(
@@ -1077,6 +1456,8 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                         ),
                       ),
                     ),
+
+                  // Demo mode indicator
                   if (emulator.isUsingStub)
                     Positioned(
                       top: hudTop,
@@ -1100,6 +1481,8 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                         ),
                       ),
                     ),
+
+                  // RetroAchievements status indicator (bottom-left)
                   if (settings.raEnabled)
                     Builder(
                       builder: (context) {
@@ -1177,6 +1560,8 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                         );
                       },
                     ),
+
+                  // Hardcore mode badge (bottom-right)
                   if (settings.raEnabled)
                     Builder(
                       builder: (context) {
@@ -1220,12 +1605,18 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                         );
                       },
                     ),
+
+                  // Achievement unlock toasts are handled via _onRuntimeUnlock listener
+
+                  // Menu button (hide in edit mode)
                   if (!_editingLayout)
                     Positioned(
                       top: hudTop,
                       left: hudEdge,
                       child: _MenuButton(onTap: _toggleMenu, size: hudBtn),
                     ),
+
+                  // Rewind button (hold to rewind) - next to menu
                   if (!_editingLayout && emulator.isRewindSupported)
                     Positioned(
                       top: hudTop,
@@ -1236,6 +1627,8 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                         size: hudBtn,
                       ),
                     ),
+
+                  // Fast forward button (hide in edit mode) - next to menu/rewind
                   if (!_editingLayout)
                     Positioned(
                       top: hudTop,
@@ -1265,6 +1658,8 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                         },
                       ),
                     ),
+
+                  // Rotation toggle button (hide in edit mode)
                   if (!_editingLayout)
                     Positioned(
                       top: hudTop,
@@ -1275,6 +1670,8 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                         size: hudBtn,
                       ),
                     ),
+
+                  // Layout editor toolbar - centered to avoid all buttons
                   if (_editingLayout)
                     Positioned(
                       top: _isLandscape
@@ -1288,6 +1685,8 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                         onReset: _resetLayout,
                       ),
                     ),
+
+                  // In-game menu overlay
                   if (_showMenu)
                     _InGameMenu(
                       game: widget.game,
@@ -1301,6 +1700,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                         _toggleMenu();
                       },
                       onSaveState: (slot) async {
+                        // Enforce hardcore mode
                         final blocked = _raRuntimeRef!.checkAction('saveState');
                         if (blocked != null) {
                           if (context.mounted) {
@@ -1332,6 +1732,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                         }
                       },
                       onLoadState: (slot) async {
+                        // Enforce hardcore mode
                         final blocked = _raRuntimeRef!.checkAction('loadState');
                         if (blocked != null) {
                           if (context.mounted) {
@@ -1366,6 +1767,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                       onToggleControls: () {
                         setState(() {
                           _showControls = !_showControls;
+                          // User is explicitly toggling — no longer auto-hidden
                           _controllerAutoHidden = false;
                         });
                       },
@@ -1374,6 +1776,10 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                       currentSpeed: emulator.speedMultiplier,
                       onSpeedChanged: (speed) {
                         emulator.setSpeed(speed);
+                      },
+                      gameScreenScale: settings.gameScreenScale,
+                      onScreenScaleChanged: (scale) {
+                        _settingsServiceRef!.setGameScreenScale(scale);
                       },
                       onExit: _onExitWithAd,
                       useJoystick: settings.useJoystick,
@@ -1398,13 +1804,14 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                         }
                       },
                       onShowShortcuts: () {
-                        _toggleMenu(); 
+                        _toggleMenu(); // close menu first
                         _showShortcutsHelp();
                       },
                       onLinkCable: () {
                         _showLinkCableDialog();
                       },
                       onCheats: () {
+                        // Block cheats when RetroAchievements hardcore mode is active
                         final blocked = _raRuntimeRef!.checkAction('cheat');
                         if (blocked != null) {
                           ScaffoldMessenger.of(context)
@@ -1447,31 +1854,57 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     );
   }
 
+  /// Portrait layout: Game on top, controls on bottom - FULLY MAXIMIZED
+  /// All values are PROPORTIONAL to screen size for consistent layout across devices
   Widget _buildPortraitLayout(
     EmulatorService emulator,
-    settings,
+    EmulatorSettings settings,
     Widget gameDisplay,
   ) {
-    final layout = _tempLayout ?? settings.gamepadLayoutPortrait;
+    final bool isNdsGame = widget.game.platform == GamePlatform.nds;
+    final layout =
+        _tempLayout ??
+        settings.gamepadLayoutForPlatform(
+          widget.game.platform,
+          landscape: false,
+        );
     final screenSize = MediaQuery.of(context).size;
     final safeArea = MediaQuery.of(context).padding;
-    final aspectRatio = emulator.screenWidth / emulator.screenHeight;
-    final maxGameWidth = screenSize.width;
+
+    // Calculate optimal game display - MAXIMUM SIZE, NO PADDING
+    final aspectRatio = isNdsGame
+        ? 256.0 / 384.0
+        : emulator.screenWidth / emulator.screenHeight;
+
+    // Use FULL width - no padding
+    final maxGameWidth = isNdsGame ? screenSize.width * 1.02 : screenSize.width;
+
+    // Calculate height from width
     double gameWidth = maxGameWidth;
     double gameHeight = gameWidth / aspectRatio;
+
+    // On TV, maximize game to fill screen (no touch controls needed)
     if (TvDetector.isTV) {
+      // Use full screen, constrained only by aspect ratio
       final availableHeight =
           screenSize.height - safeArea.top - safeArea.bottom;
+
+      // Try full width first
       gameWidth = screenSize.width;
       gameHeight = gameWidth / aspectRatio;
+
+      // If too tall, constrain by height
       if (gameHeight > availableHeight) {
         gameHeight = availableHeight;
         gameWidth = gameHeight * aspectRatio;
       }
+
+      // Center vertically
       final gameTop = safeArea.top + (availableHeight - gameHeight) / 2;
 
       return Stack(
         children: [
+          // Game display - centered and FULLY MAXIMIZED for TV
           Positioned(
             top: gameTop,
             left: (screenSize.width - gameWidth) / 2,
@@ -1484,76 +1917,202 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
         ],
       );
     }
-    final gameTopOffset = screenSize.height * 0.07;
-    final gameTop = safeArea.top + gameTopOffset;
-    final maxGameHeight = screenSize.height * 0.42;
 
-    if (gameHeight > maxGameHeight) {
-      gameHeight = maxGameHeight;
-      gameWidth = gameHeight * aspectRatio;
+    // For NDS, skip the control-area height cap. The tall 256×384
+    // framebuffer stays full width and controls can use a modest overlap.
+    final bool isNds = widget.game.platform == GamePlatform.nds;
+
+    // Cap game height so the gamepad area always has enough room.
+    // GB/GBC (160×144, ratio ~1.11) at full width would consume ~90% of
+    // the width as height, leaving almost no space for controls.
+    // Limit the game to at most 42% of screen height so controls get ≥50%.
+    // NDS: NO cap — maximize the dual-screen display at full width;
+    // buttons overlay the bottom portion of the screen.
+    if (!isNds) {
+      // 0.46 (was 0.42): controls overlay-tolerate a few extra percent and
+      // the old cap visibly shrank near-square systems (GB/GBC) on 16:9
+      // screens — "maximum possible size" wins.
+      final maxGameHeight = screenSize.height * 0.46;
+      if (gameHeight > maxGameHeight) {
+        gameHeight = maxGameHeight;
+        gameWidth = gameHeight * aspectRatio;
+      }
     }
-    final overlapAmount = screenSize.height * 0.05;
-    const portraitUpShift = -0.06; 
-    final GamepadLayout shiftedLayout = layout.copyWith(
-      dpad: layout.dpad.copyWith(
-        y: (layout.dpad.y + portraitUpShift).clamp(0.0, 1.0),
-      ),
-      aButton: layout.aButton.copyWith(
-        y: (layout.aButton.y + portraitUpShift).clamp(0.0, 1.0),
-      ),
-      bButton: layout.bButton.copyWith(
-        y: (layout.bButton.y + portraitUpShift).clamp(0.0, 1.0),
-      ),
-      lButton: layout.lButton.copyWith(
-        y: (layout.lButton.y + portraitUpShift).clamp(0.0, 1.0),
-      ),
-      rButton: layout.rButton.copyWith(
-        y: (layout.rButton.y + portraitUpShift).clamp(0.0, 1.0),
-      ),
-      startButton: layout.startButton.copyWith(
-        y: (layout.startButton.y + portraitUpShift).clamp(0.0, 1.0),
-      ),
-      selectButton: layout.selectButton.copyWith(
-        y: (layout.selectButton.y + portraitUpShift).clamp(0.0, 1.0),
-      ),
-      xButton: layout.xButton?.copyWith(
-        y: ((layout.xButton?.y ?? 0) + portraitUpShift).clamp(0.0, 1.0),
-      ),
-      yButton: layout.yButton?.copyWith(
-        y: ((layout.yButton?.y ?? 0) + portraitUpShift).clamp(0.0, 1.0),
-      ),
+
+    // Apply user game screen scale setting (1.0 = max, 0.5 = half size)
+    final double screenScale = (settings.gameScreenScale as double?) ?? 1.0;
+    if (screenScale < 1.0) {
+      gameWidth *= screenScale;
+      gameHeight *= screenScale;
+    }
+
+    // NDS: small top offset; the display is slightly oversized and clipped
+    // horizontally to feel larger without adding padding.
+    // Others: 7% top offset so HUD buttons don't clip the game edge.
+    final gameTop = isNds
+        ? safeArea.top + screenSize.height * 0.03
+        : safeArea.top + screenSize.height * 0.07;
+
+    final gameRect = Rect.fromLTWH(
+      (screenSize.width - gameWidth) / 2,
+      gameTop,
+      gameWidth,
+      gameHeight,
     );
 
-    return Stack(
-      children: [
-        Positioned(
-          top: gameTop,
-          left: (screenSize.width - gameWidth) / 2,
-          child: SizedBox(
-            width: gameWidth,
-            height: gameHeight,
-            child: gameDisplay,
-          ),
-        ),
-        if (_showControls)
+    return _wrapNdsTouchSurface(
+      emulator: emulator,
+      gameRect: gameRect,
+      isLandscapeLayout: false,
+      child: Stack(
+        children: [
+          // Game display at top - FULL WIDTH, NO PADDING
           Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            height: screenSize.height - gameTop - gameHeight + overlapAmount,
-            child: VirtualGamepad(
-              gameRect: Rect.fromLTWH(
-                (screenSize.width - gameWidth) / 2,
-                gameTop,
-                gameWidth,
-                gameHeight,
+            top: gameTop,
+            left: gameRect.left,
+            child: SizedBox(
+              width: gameWidth,
+              height: gameHeight,
+              child: gameDisplay,
+            ),
+          ),
+
+          // Virtual gamepad - full-screen overlay. Button positions are pure
+          // fractions of the screen, so the overlay must span the whole phone;
+          // empty areas let touches fall through to the game/touch surface.
+          if (_showControls)
+            Positioned.fill(
+              child: VirtualGamepad(
+                onKeysChanged: _onVirtualKeysChanged,
+                onAnalogChanged: _onVirtualAnalogChanged,
+                onRightAnalogChanged: _onVirtualRightAnalogChanged,
+                opacity: settings.gamepadOpacity,
+                scale: settings.gamepadScale,
+                enableVibration: settings.enableVibration,
+                layout: layout,
+                editMode: _editingLayout,
+                onLayoutChanged: (newLayout) {
+                  setState(() => _tempLayout = newLayout);
+                },
+                useJoystick: settings.useJoystick,
+                skin: settings.gamepadSkin,
+                platform: widget.game.platform,
               ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// Landscape layout: Game centered, controls overlay on sides - FULLY MAXIMIZED
+  Widget _buildLandscapeLayout(
+    EmulatorService emulator,
+    EmulatorSettings settings,
+    Widget gameDisplay,
+  ) {
+    final bool isNdsGame = widget.game.platform == GamePlatform.nds;
+    final baseLayout =
+        _tempLayout ??
+        settings.gamepadLayoutForPlatform(
+          widget.game.platform,
+          landscape: true,
+        );
+    final screenSize = MediaQuery.of(context).size;
+    final safeArea = MediaQuery.of(context).padding;
+
+    // Calculate game size - MAXIMUM SIZE, NO PADDING
+    final aspectRatio = isNdsGame
+        ? 512.0 / 192.0
+        : emulator.screenWidth / emulator.screenHeight;
+
+    // On TV, use safe area to avoid overscan but maximize within it
+    final availableWidth = TvDetector.isTV
+        ? screenSize.width - safeArea.left - safeArea.right
+        : screenSize.width;
+    final availableHeight = TvDetector.isTV
+        ? screenSize.height - safeArea.top - safeArea.bottom
+        : screenSize.height;
+
+    double gameWidth;
+    double gameHeight;
+    if (isNdsGame) {
+      gameWidth = availableWidth * 0.96;
+      gameHeight = gameWidth / aspectRatio;
+      final maxGameHeight = availableHeight * 0.96;
+      if (gameHeight > maxGameHeight) {
+        gameHeight = maxGameHeight;
+        gameWidth = gameHeight * aspectRatio;
+      }
+    } else {
+      // Calculate width from height
+      gameHeight = availableHeight;
+      gameWidth = gameHeight * aspectRatio;
+
+      // If too wide, constrain by width
+      if (gameWidth > availableWidth) {
+        gameWidth = availableWidth;
+        gameHeight = gameWidth / aspectRatio;
+      }
+    }
+
+    // Cap game width so each side always has at least some space
+    // for touch controls.  GB/GBC (nearly-square) would otherwise leave
+    // tiny side zones and button sizes scale with gameRect.width.
+    // On TV, skip this cap — no touch controls, use full screen.
+    // NDS uses absolute overlay controls in VirtualGamepad, so it can use
+    // the full available width.
+    if (!TvDetector.isTV && !isNdsGame) {
+      // 0.75 (was 0.64): on 16:9 devices the old cap cut 4:3 games to ~85%
+      // of their full-height fit. Touch controls are translucent overlays
+      // positioned relative to gameRect, so a modest overlap with the game
+      // edges is fine — maximum game size wins.
+      final maxGameWidth = screenSize.width * 0.75;
+      if (gameWidth > maxGameWidth) {
+        gameWidth = maxGameWidth;
+        gameHeight = gameWidth / aspectRatio;
+      }
+    }
+
+    // Apply user game screen scale setting (1.0 = max, 0.5 = half size)
+    final double screenScale = (settings.gameScreenScale as double?) ?? 1.0;
+    if (screenScale < 1.0) {
+      gameWidth *= screenScale;
+      gameHeight *= screenScale;
+    }
+
+    final gameRect = Rect.fromLTWH(
+      (screenSize.width - gameWidth) / 2,
+      (screenSize.height - gameHeight) / 2,
+      gameWidth,
+      gameHeight,
+    );
+
+    return _wrapNdsTouchSurface(
+      emulator: emulator,
+      gameRect: gameRect,
+      isLandscapeLayout: true,
+      child: Stack(
+        children: [
+          // Game display - centered and FULLY MAXIMIZED
+          Center(
+            child: SizedBox(
+              width: gameWidth,
+              height: gameHeight,
+              child: gameDisplay,
+            ),
+          ),
+
+          // Virtual gamepad overlay in landscape — full-screen; button
+          // positions are pure fractions of the screen, independent of the game.
+          if (_showControls)
+            VirtualGamepad(
               onKeysChanged: _onVirtualKeysChanged,
               onAnalogChanged: _onVirtualAnalogChanged,
+              onRightAnalogChanged: _onVirtualRightAnalogChanged,
               opacity: settings.gamepadOpacity,
               scale: settings.gamepadScale,
               enableVibration: settings.enableVibration,
-              layout: shiftedLayout,
+              layout: baseLayout,
               editMode: _editingLayout,
               onLayoutChanged: (newLayout) {
                 setState(() => _tempLayout = newLayout);
@@ -1562,96 +2121,112 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
               skin: settings.gamepadSkin,
               platform: widget.game.platform,
             ),
-          ),
-      ],
+        ],
+      ),
     );
   }
 
-  Widget _buildLandscapeLayout(
-    EmulatorService emulator,
-    settings,
-    Widget gameDisplay,
-  ) {
-    final baseLayout = _tempLayout ?? settings.gamepadLayoutLandscape;
-    final screenSize = MediaQuery.of(context).size;
-    final safeArea = MediaQuery.of(context).padding;
-    final aspectRatio = emulator.screenWidth / emulator.screenHeight;
-    final availableWidth = TvDetector.isTV
-        ? screenSize.width - safeArea.left - safeArea.right
-        : screenSize.width;
-    final availableHeight = TvDetector.isTV
-        ? screenSize.height - safeArea.top - safeArea.bottom
-        : screenSize.height;
-    double gameHeight = availableHeight;
-    double gameWidth = gameHeight * aspectRatio;
-    if (gameWidth > availableWidth) {
-      gameWidth = availableWidth;
-      gameHeight = gameWidth / aspectRatio;
-    }
-    if (!TvDetector.isTV) {
-      final maxGameWidth = screenSize.width * 0.64;
-      if (gameWidth > maxGameWidth) {
-        gameWidth = maxGameWidth;
-        gameHeight = gameWidth / aspectRatio;
-      }
-    }
-    GamepadLayout layout = baseLayout;
-    if (aspectRatio <= 1.2) {
-      const lrShift = 0.08; 
-      layout = layout.copyWith(
-        lButton: layout.lButton.copyWith(
-          y: (layout.lButton.y + lrShift).clamp(0.0, 1.0),
+  Widget _wrapNdsTouchSurface({
+    required EmulatorService emulator,
+    required Rect gameRect,
+    required bool isLandscapeLayout,
+    required Widget child,
+  }) {
+    if (widget.game.platform != GamePlatform.nds) return child;
+
+    return SizedBox.expand(
+      child: Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: (event) => _handleNdsTouch(
+          emulator: emulator,
+          position: event.localPosition,
+          gameRect: gameRect,
+          isLandscapeLayout: isLandscapeLayout,
         ),
-        rButton: layout.rButton.copyWith(
-          y: (layout.rButton.y + lrShift).clamp(0.0, 1.0),
+        onPointerMove: (event) => _handleNdsTouch(
+          emulator: emulator,
+          position: event.localPosition,
+          gameRect: gameRect,
+          isLandscapeLayout: isLandscapeLayout,
         ),
-      );
+        onPointerUp: (_) => _releaseNdsTouch(emulator),
+        onPointerCancel: (_) => _releaseNdsTouch(emulator),
+        child: child,
+      ),
+    );
+  }
+
+  void _handleNdsTouch({
+    required EmulatorService emulator,
+    required Offset position,
+    required Rect gameRect,
+    required bool isLandscapeLayout,
+  }) {
+    final point = _localToNdsPointer(
+      position: position,
+      gameRect: gameRect,
+      isLandscapeLayout: isLandscapeLayout,
+    );
+    if (point == null) {
+      _releaseNdsTouch(emulator);
+      return;
     }
 
-    return Stack(
-      children: [
-        Center(
-          child: SizedBox(
-            width: gameWidth,
-            height: gameHeight,
-            child: gameDisplay,
-          ),
-        ),
-        if (_showControls)
-          VirtualGamepad(
-            gameRect: Rect.fromLTWH(
-              (screenSize.width - gameWidth) / 2,
-              (screenSize.height - gameHeight) / 2,
-              gameWidth,
-              gameHeight,
-            ),
-            onKeysChanged: _onVirtualKeysChanged,
-            onAnalogChanged: _onVirtualAnalogChanged,
-            opacity: settings.gamepadOpacity,
-            scale: settings.gamepadScale,
-            enableVibration: settings.enableVibration,
-            layout: layout,
-            editMode: _editingLayout,
-            onLayoutChanged: (newLayout) {
-              setState(() => _tempLayout = newLayout);
-            },
-            useJoystick: settings.useJoystick,
-            skin: settings.gamepadSkin,
-            platform: widget.game.platform,
-          ),
-      ],
-    );
+    emulator.setTouch(point.x, point.y, true);
+    _ndsTouchActive = true;
+  }
+
+  ({int x, int y})? _localToNdsPointer({
+    required Offset position,
+    required Rect gameRect,
+    required bool isLandscapeLayout,
+  }) {
+    if (!gameRect.contains(position) ||
+        gameRect.width <= 0 ||
+        gameRect.height <= 0) {
+      return null;
+    }
+
+    final fbW = isLandscapeLayout ? 512.0 : 256.0;
+    final fbH = isLandscapeLayout ? 192.0 : 384.0;
+    final px = (position.dx - gameRect.left) / gameRect.width * fbW;
+    final py = (position.dy - gameRect.top) / gameRect.height * fbH;
+
+    if (isLandscapeLayout) {
+      if (px < fbW / 2.0) return null;
+    } else {
+      if (py < fbH / 2.0) return null;
+    }
+
+    int normalizePointer(double pixel, double extent) {
+      if (extent <= 1.0) return 0;
+      final clamped = pixel.clamp(0.0, extent - 1.0).toDouble();
+      final value = ((clamped / (extent - 1.0)) * 65534.0 - 32767.0).round();
+      return value.clamp(-32767, 32767).toInt();
+    }
+
+    return (x: normalizePointer(px, fbW), y: normalizePointer(py, fbH));
+  }
+
+  void _releaseNdsTouch(EmulatorService emulator) {
+    if (!_ndsTouchActive) return;
+    emulator.setTouch(0, 0, false);
+    _ndsTouchActive = false;
   }
 
   void _enterEditMode() {
     final settings = _settingsServiceRef!.settings;
+    final p = widget.game.platform;
     setState(() {
       _editingLayout = true;
       _showMenu = false;
-      _tempLayout = _isLandscape
-          ? settings.gamepadLayoutLandscape
-          : settings.gamepadLayoutPortrait;
+      _tempLayout = settings.gamepadLayoutForPlatform(
+        p,
+        landscape: _isLandscape,
+      );
     });
+
+    // Pause emulation while editing
     _emulatorRef!.pause();
   }
 
@@ -1661,18 +2236,21 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     final settingsService = _settingsServiceRef!;
     final emulatorService = _emulatorRef!;
     final scaffoldMessenger = ScaffoldMessenger.of(context);
+    final p = widget.game.platform;
 
-    if (_isLandscape) {
-      await settingsService.setGamepadLayoutLandscape(_tempLayout!);
-    } else {
-      await settingsService.setGamepadLayoutPortrait(_tempLayout!);
-    }
+    await settingsService.setGamepadLayoutForPlatform(
+      p,
+      landscape: _isLandscape,
+      layout: _tempLayout!,
+    );
     if (!mounted) return;
 
     setState(() {
       _editingLayout = false;
       _tempLayout = null;
     });
+
+    // Resume emulation
     emulatorService.start();
 
     if (mounted) {
@@ -1690,15 +2268,19 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
       _editingLayout = false;
       _tempLayout = null;
     });
+
+    // Resume emulation
     _emulatorRef?.start();
   }
 
   void _resetLayout() {
-    if (_isLandscape) {
-      setState(() => _tempLayout = GamepadLayout.defaultLandscape);
-    } else {
-      setState(() => _tempLayout = GamepadLayout.defaultPortrait);
-    }
+    final p = widget.game.platform;
+    setState(
+      () => _tempLayout = GamepadLayout.defaultForPlatform(
+        p,
+        landscape: _isLandscape,
+      ),
+    );
   }
 }
 
@@ -1816,6 +2398,7 @@ class _LayoutEditorToolbar extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          // Header
           Row(
             children: [
               Icon(Icons.tune, color: colors.accent, size: 20),
@@ -1831,6 +2414,7 @@ class _LayoutEditorToolbar extends StatelessWidget {
                   ),
                 ),
               ),
+              // Close button — 44pt min touch target, TV focusable, semantics
               TvFocusable(
                 onTap: () {
                   HapticFeedback.lightImpact();
@@ -1864,14 +2448,19 @@ class _LayoutEditorToolbar extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 8),
+
+          // Instructions
           Text(
             'Drag buttons to move • Tap to select • Use +/- to resize',
             style: TextStyle(fontSize: 11, color: colors.textMuted),
             textAlign: TextAlign.center,
           ),
           const SizedBox(height: 12),
+
+          // Action buttons
           Row(
             children: [
+              // Reset button
               Expanded(
                 child: TvFocusable(
                   onTap: () {
@@ -1920,6 +2509,8 @@ class _LayoutEditorToolbar extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 10),
+
+              // Save button
               Expanded(
                 child: TvFocusable(
                   onTap: () {
@@ -1985,6 +2576,8 @@ class _InGameMenu extends StatelessWidget {
   final VoidCallback onEditLayout;
   final double currentSpeed;
   final void Function(double speed) onSpeedChanged;
+  final double gameScreenScale;
+  final void Function(double scale) onScreenScaleChanged;
   final VoidCallback onExit;
   final bool useJoystick;
   final VoidCallback onToggleJoystick;
@@ -2007,6 +2600,8 @@ class _InGameMenu extends StatelessWidget {
     required this.onEditLayout,
     required this.currentSpeed,
     required this.onSpeedChanged,
+    required this.gameScreenScale,
+    required this.onScreenScaleChanged,
     required this.onExit,
     required this.useJoystick,
     required this.onToggleJoystick,
@@ -2030,7 +2625,7 @@ class _InGameMenu extends StatelessWidget {
           color: Colors.black.withAlpha(138),
           child: Center(
             child: GestureDetector(
-              onTap: () {}, 
+              onTap: () {}, // Prevent tap through
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 400),
                 child: Container(
@@ -2060,6 +2655,7 @@ class _InGameMenu extends StatelessWidget {
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
                             children: [
+                              // Title
                               Text(
                                 'PAUSED',
                                 style: TextStyle(
@@ -2079,8 +2675,12 @@ class _InGameMenu extends StatelessWidget {
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                               ),
+
+                              // Achievement progress section
                               if (raService != null && raService!.isLoggedIn)
                                 _buildAchievementSection(context),
+
+                              // View Achievements button
                               if (raService != null &&
                                   raService!.isLoggedIn &&
                                   raService!.gameData != null &&
@@ -2097,6 +2697,8 @@ class _InGameMenu extends StatelessWidget {
                               ],
 
                               const SizedBox(height: 20),
+
+                              // Resume button
                               _MenuActionButton(
                                 icon: Icons.play_arrow,
                                 label: 'Resume',
@@ -2105,6 +2707,8 @@ class _InGameMenu extends StatelessWidget {
                                 autofocus: true,
                               ),
                               const SizedBox(height: 10),
+
+                              // Screenshot button
                               _MenuActionButton(
                                 icon: Icons.camera_alt,
                                 label: 'Screenshot',
@@ -2118,6 +2722,10 @@ class _InGameMenu extends StatelessWidget {
                                 onTap: onCheats,
                               ),
                               const SizedBox(height: 10),
+
+                              // Save/Load states
+                              // On TV: stack vertically for D-pad navigation
+                              // On phone: side by side
                               if (TvDetector.isTV) ...[
                                 _MenuActionButton(
                                   icon: Icons.save,
@@ -2166,6 +2774,8 @@ class _InGameMenu extends StatelessWidget {
                                 ),
                               ],
                               const SizedBox(height: 10),
+
+                              // Other options
                               _MenuActionButton(
                                 icon: showControls
                                     ? Icons.gamepad
@@ -2176,6 +2786,8 @@ class _InGameMenu extends StatelessWidget {
                                 onTap: onToggleControls,
                               ),
                               const SizedBox(height: 10),
+
+                              // D-Pad / Joystick selector
                               _InputTypeSelector(
                                 useJoystick: useJoystick,
                                 onChanged: onToggleJoystick,
@@ -2188,6 +2800,15 @@ class _InGameMenu extends StatelessWidget {
                                 onTap: onEditLayout,
                               ),
                               const SizedBox(height: 10),
+
+                              // Game screen size control
+                              _ScreenScaleSelector(
+                                currentScale: gameScreenScale,
+                                onScaleChanged: onScreenScaleChanged,
+                              ),
+                              const SizedBox(height: 10),
+
+                              // Speed control
                               _SpeedSelector(
                                 currentSpeed: currentSpeed,
                                 onSpeedChanged: onSpeedChanged,
@@ -2267,6 +2888,8 @@ class _InGameMenu extends StatelessWidget {
     final gameData = raService?.gameData;
     final isResolving = raService?.isResolvingGame ?? false;
     final isHardcore = raRuntime?.isHardcore ?? false;
+
+    // Still resolving game
     if (isResolving) {
       return Padding(
         padding: const EdgeInsets.only(top: 12),
@@ -2290,6 +2913,8 @@ class _InGameMenu extends StatelessWidget {
         ),
       );
     }
+
+    // Game not recognized by RA
     if (session == null || session.gameId <= 0) {
       return Padding(
         padding: const EdgeInsets.only(top: 12),
@@ -2318,6 +2943,8 @@ class _InGameMenu extends StatelessWidget {
         ),
       );
     }
+
+    // Game recognized but data still loading
     if (gameData == null) {
       return Padding(
         padding: const EdgeInsets.only(top: 12),
@@ -2341,6 +2968,8 @@ class _InGameMenu extends StatelessWidget {
         ),
       );
     }
+
+    // Have achievement data — show progress
     final total = gameData.achievements.length;
     final earned = gameData.achievements.where((a) => a.isEarned).length;
     final earnedHc = gameData.achievements
@@ -2368,6 +2997,7 @@ class _InGameMenu extends StatelessWidget {
         ),
         child: Column(
           children: [
+            // Header row
             Row(
               children: [
                 Icon(
@@ -2421,6 +3051,7 @@ class _InGameMenu extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 8),
+            // Progress bar
             ClipRRect(
               borderRadius: BorderRadius.circular(4),
               child: LinearProgressIndicator(
@@ -2431,6 +3062,7 @@ class _InGameMenu extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 6),
+            // Points row
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -2485,6 +3117,7 @@ class _InGameMenu extends StatelessWidget {
         },
       ),
     ).then((_) {
+      // Restore focus to the pause menu so D-pad navigation works on TV
       if (context.mounted) {
         FocusScope.of(context).requestFocus();
       }
@@ -2622,6 +3255,7 @@ class _StateSlotDialogState extends State<_StateSlotDialog> {
     );
   }
 
+  /// Handles tap on a slot. All slots are now free.
   void _onSlotTap(int index, bool hasState) {
     widget.onSelect(index);
   }
@@ -2659,6 +3293,7 @@ class _StateSlotDialogState extends State<_StateSlotDialog> {
                 ),
                 child: Row(
                   children: [
+                    // Screenshot thumbnail (GBA 3:2 aspect ratio)
                     ClipRRect(
                       borderRadius: const BorderRadius.only(
                         topLeft: Radius.circular(11),
@@ -2679,6 +3314,7 @@ class _StateSlotDialogState extends State<_StateSlotDialog> {
                       ),
                     ),
                     const SizedBox(width: 12),
+                    // Slot info
                     Expanded(
                       child: Padding(
                         padding: const EdgeInsets.symmetric(vertical: 10),
@@ -2713,6 +3349,7 @@ class _StateSlotDialogState extends State<_StateSlotDialog> {
                         ),
                       ),
                     ),
+                    // Chevron or lock indicator
                     if (!isDisabled)
                       Padding(
                         padding: const EdgeInsets.only(right: 12),
@@ -2995,6 +3632,103 @@ class _FastForwardButton extends StatelessWidget {
   }
 }
 
+/// Inline game screen size selector for the in-game menu.
+/// Allows quick resizing of the game display (50% - 100%).
+class _ScreenScaleSelector extends StatelessWidget {
+  final double currentScale;
+  final void Function(double scale) onScaleChanged;
+
+  const _ScreenScaleSelector({
+    required this.currentScale,
+    required this.onScaleChanged,
+  });
+
+  static const List<double> scales = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColorTheme.of(context);
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: colors.backgroundLight,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: colors.surfaceLight, width: 1),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.fit_screen, color: colors.textSecondary, size: 18),
+              const SizedBox(width: 8),
+              Text(
+                'Screen Size',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: colors.textSecondary,
+                ),
+              ),
+              const Spacer(),
+              Text(
+                '${(currentScale * 100).round()}%',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.bold,
+                  color: colors.accent,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: scales.map((scale) {
+              final isSelected = (currentScale - scale).abs() < 0.01;
+              final isLast = scale == scales.last;
+              return Expanded(
+                child: Padding(
+                  padding: EdgeInsets.only(right: isLast ? 0 : 4),
+                  child: GestureDetector(
+                    onTap: () => onScaleChanged(scale),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      decoration: BoxDecoration(
+                        color: isSelected ? colors.accent : colors.surface,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: isSelected
+                              ? colors.accent
+                              : colors.surfaceLight,
+                          width: 1,
+                        ),
+                      ),
+                      child: Center(
+                        child: Text(
+                          '${(scale * 100).round()}%',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: isSelected
+                                ? FontWeight.bold
+                                : FontWeight.normal,
+                            color: isSelected
+                                ? colors.backgroundDark
+                                : colors.textSecondary,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _SpeedSelector extends StatelessWidget {
   final double currentSpeed;
   final void Function(double speed) onSpeedChanged;
@@ -3044,6 +3778,9 @@ class _SpeedSelector extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 10),
+          // On TV: two rows of 3 buttons so D-pad can navigate both
+          // horizontally (within a row) and vertically (between rows).
+          // On phone: original single row.
           if (isTV) ...[
             _buildSpeedRow(
               context,
@@ -3112,8 +3849,14 @@ class _SpeedSelector extends StatelessWidget {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+//  Shortcuts help dialog
+// ═══════════════════════════════════════════════════════════════════════
+
 class _ShortcutsHelpDialog extends StatelessWidget {
-  const _ShortcutsHelpDialog();
+  final GamePlatform platform;
+
+  const _ShortcutsHelpDialog({required this.platform});
 
   void _dismiss(BuildContext context) {
     if (Navigator.of(context).canPop()) {
@@ -3125,6 +3868,15 @@ class _ShortcutsHelpDialog extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = AppColorTheme.of(context);
     final maxDialogWidth = MediaQuery.of(context).size.width * 0.9;
+    final isGenesis = platform == GamePlatform.md;
+    final modifier = isGenesis ? 'Mode' : 'Select';
+    final quickSaveButton = isGenesis ? 'B' : 'A';
+    final quickLoadButton = isGenesis ? 'C' : 'B';
+    final fastForwardButton = isGenesis ? 'Z' : 'R1';
+    final tapAction = isGenesis ? 'Genesis Mode button' : 'GBA Select button';
+
+    // Wrap in Focus so ANY key press (gamepad, remote, keyboard) dismisses it.
+    // Also wrap in GestureDetector so tapping anywhere outside the card works.
     return Focus(
       autofocus: true,
       onKeyEvent: (_, _) {
@@ -3169,13 +3921,25 @@ class _ShortcutsHelpDialog extends StatelessWidget {
                   _sectionHeader(
                     context,
                     Icons.gamepad,
-                    'Gamepad combos  (hold Select +)',
+                    'Gamepad combos  (hold $modifier +)',
                   ),
-                  _shortcutRow(context, 'Select + Start', 'Pause menu'),
-                  _shortcutRow(context, 'Select + A', 'Quick save (slot 1)'),
-                  _shortcutRow(context, 'Select + B', 'Quick load (slot 1)'),
-                  _shortcutRow(context, 'Select + R1', 'Fast forward'),
-                  _shortcutRow(context, 'Select (tap)', 'GBA Select button'),
+                  _shortcutRow(context, '$modifier + Start', 'Pause menu'),
+                  _shortcutRow(
+                    context,
+                    '$modifier + $quickSaveButton',
+                    'Quick save (slot 1)',
+                  ),
+                  _shortcutRow(
+                    context,
+                    '$modifier + $quickLoadButton',
+                    'Quick load (slot 1)',
+                  ),
+                  _shortcutRow(
+                    context,
+                    '$modifier + $fastForwardButton',
+                    'Fast forward',
+                  ),
+                  _shortcutRow(context, '$modifier (tap)', tapAction),
                   const SizedBox(height: 14),
                   _sectionHeader(
                     context,
@@ -3311,6 +4075,7 @@ class _InputTypeSelector extends StatelessWidget {
           const SizedBox(height: 10),
           Row(
             children: [
+              // D-Pad option
               Expanded(
                 child: TvFocusable(
                   onTap: useJoystick ? onChanged : null,
@@ -3351,6 +4116,7 @@ class _InputTypeSelector extends StatelessWidget {
                   ),
                 ),
               ),
+              // Joystick option
               Expanded(
                 child: TvFocusable(
                   onTap: !useJoystick ? onChanged : null,
@@ -3397,6 +4163,10 @@ class _InputTypeSelector extends StatelessWidget {
     );
   }
 }
+
+// ═══════════════════════════════════════════════════════════════
+// Link Cable Dialog
+// ═══════════════════════════════════════════════════════════════
 
 class _LinkCableDialog extends StatefulWidget {
   final GameRom game;
@@ -3576,6 +4346,7 @@ class _LinkCableDialogState extends State<_LinkCableDialog> {
     final maxDialogWidth = MediaQuery.of(context).size.width * 0.9;
 
     return Focus(
+      // Catch back/B button to close the dialog from anywhere inside it
       canRequestFocus: false,
       onKeyEvent: (_, event) {
         if (event is KeyDownEvent &&
@@ -3655,6 +4426,7 @@ class _LinkCableDialogState extends State<_LinkCableDialog> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // Status / error message
                 if (_statusMessage != null || widget.linkCable.error != null)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 12),
@@ -3707,9 +4479,9 @@ class _LinkCableDialogState extends State<_LinkCableDialog> {
               ),
             ),
           ],
-        ), 
-      ), 
-    ); 
+        ), // AlertDialog
+      ), // FocusTraversalGroup
+    ); // Focus
   }
 
   Widget _buildDisconnectedView() {
@@ -3723,6 +4495,8 @@ class _LinkCableDialogState extends State<_LinkCableDialog> {
           style: TextStyle(color: colors.textSecondary, fontSize: 13),
         ),
         const SizedBox(height: 16),
+
+        // Host button
         SizedBox(
           width: double.infinity,
           child: TvFocusable(
@@ -3745,6 +4519,8 @@ class _LinkCableDialogState extends State<_LinkCableDialog> {
           ),
         ),
         const SizedBox(height: 12),
+
+        // OR divider
         Row(
           children: [
             Expanded(child: Divider(color: colors.surfaceLight)),
@@ -3759,6 +4535,8 @@ class _LinkCableDialogState extends State<_LinkCableDialog> {
           ],
         ),
         const SizedBox(height: 12),
+
+        // Join section — on TV use button + dialog so TextField can trigger keyboard
         if (TvDetector.isTV)
           TvFocusable(
             onTap: _showIpInputDialog,
@@ -3973,6 +4751,12 @@ class _LinkCableDialogState extends State<_LinkCableDialog> {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+//  Top toast for RA status messages
+// ═══════════════════════════════════════════════════════════════════════
+
+/// An animated top-of-screen toast with optional image and subtitle,
+/// used for RetroAchievements status messages (achievement counts, etc.).
 class _RATopToast extends StatefulWidget {
   final String title;
   final String? subtitle;
@@ -4036,6 +4820,8 @@ class _RATopToastState extends State<_RATopToast>
       await _controller.reverse();
       widget.onDismissed();
     } catch (e) {
+      // AnimationController may be disposed if the game screen exits
+      // while the toast is still visible — log for diagnostics.
       debugPrint(
         '_RATopToast: animation error (likely disposed during exit) — $e',
       );
@@ -4088,6 +4874,7 @@ class _RATopToastState extends State<_RATopToast>
               ),
               child: Row(
                 children: [
+                  // Image or icon
                   if (hasImage)
                     ClipRRect(
                       borderRadius: BorderRadius.circular(8),
@@ -4106,6 +4893,8 @@ class _RATopToastState extends State<_RATopToast>
                   else
                     Icon(widget.icon, color: widget.accentColor, size: 28),
                   const SizedBox(width: 10),
+
+                  // Text content
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,

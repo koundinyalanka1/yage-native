@@ -1,7 +1,24 @@
+/*
+ * YAGE Core Options UI Module
+ *
+ * Manages dynamic core option storage with metadata (descriptions, categories,
+ * possible values) and JSON serialization for Flutter UI generation.
+ *
+ * Workflow:
+ *   1. Core calls SET_VARIABLES or SET_CORE_OPTIONS_V2 during load
+ *   2. Options stored with full metadata in enhanced structure
+ *   3. Flutter calls yage_core_get_options_json()
+ *   4. JSON schema returned with all options and possible values
+ *   5. Dart generates dynamic settings UI
+ *   6. User changes setting → Flutter calls yage_core_set_option(key, value)
+ *   7. Next retro_run() sees updated value via GET_VARIABLE callback
+ */
+
 #include "yage_internal.h"
 #include <ctype.h>
 #include <stdio.h>
 
+/* ── Enhanced core option structure with metadata ─────────────────────── */
 #define MAX_CORE_OPTIONS 256
 #define MAX_OPTION_KEY_LEN 128
 #define MAX_OPTION_DESC_LEN 256
@@ -13,9 +30,9 @@ struct core_option_metadata {
     char key[MAX_OPTION_KEY_LEN];
     char description[MAX_OPTION_DESC_LEN];
     char category[MAX_OPTION_CAT_LEN];
-    char value[MAX_OPTION_VAL_LEN];           
+    char value[MAX_OPTION_VAL_LEN];           /* Current value */
     char default_value[MAX_OPTION_VAL_LEN];
-    char type[32];                             
+    char type[32];                             /* "select", "range", "string", etc. */
     struct {
         char value[MAX_OPTION_VAL_LEN];
         char label[MAX_OPTION_VAL_LEN];
@@ -26,6 +43,10 @@ struct core_option_metadata {
 static struct core_option_metadata g_core_options[MAX_CORE_OPTIONS];
 static int g_core_options_count = 0;
 static pthread_mutex_t g_options_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* ══════════════════════════════════════════════════════════════════════
+ * Option storage and lookup
+ * ══════════════════════════════════════════════════════════════════════ */
 
 void options_ui_clear(void) {
     pthread_mutex_lock(&g_options_mutex);
@@ -43,6 +64,10 @@ static int find_option_index(const char* key) {
     return -1;
 }
 
+/* ══════════════════════════════════════════════════════════════════════
+ * Store option from libretro SET_VARIABLES or SET_CORE_OPTIONS_V2
+ * ══════════════════════════════════════════════════════════════════════ */
+
 void options_ui_set_from_retro_variable(const char* key, const char* value) {
     if (!key || !value) return;
 
@@ -59,8 +84,8 @@ void options_ui_set_from_retro_variable(const char* key, const char* value) {
         strncpy(opt->key, key, MAX_OPTION_KEY_LEN - 1);
         opt->key[MAX_OPTION_KEY_LEN - 1] = '\0';
 
-        
-        
+        /* Format: "key; val1|val2|val3" with optional description */
+        /* Value format "default | opt1 | opt2" means select type */
         strncpy(opt->value, value, MAX_OPTION_VAL_LEN - 1);
         opt->value[MAX_OPTION_VAL_LEN - 1] = '\0';
 
@@ -69,35 +94,35 @@ void options_ui_set_from_retro_variable(const char* key, const char* value) {
 
         strncpy(opt->type, "select", sizeof(opt->type) - 1);
 
-        
+        /* Parse possible values from pipe-separated string */
         opt->values_count = 0;
         const char* p = value;
         int is_first = 1;
 
         while (*p && opt->values_count < MAX_OPTION_VALUES) {
-            
+            /* Skip whitespace */
             while (*p && isspace(*p)) p++;
             if (!*p) break;
 
-            
+            /* Extract value */
             const char* start = p;
             while (*p && *p != '|') p++;
 
             int len = p - start;
             if (len > 0 && len < (int)MAX_OPTION_VAL_LEN) {
-                
+                /* Trim trailing whitespace */
                 while (len > 0 && isspace(start[len - 1])) len--;
 
                 strncpy(opt->values[opt->values_count].value, start, len);
                 opt->values[opt->values_count].value[len] = '\0';
 
-                
+                /* Use value as label unless we can extract better label */
                 strncpy(opt->values[opt->values_count].label,
                         opt->values[opt->values_count].value,
                         MAX_OPTION_VAL_LEN - 1);
                 opt->values[opt->values_count].label[MAX_OPTION_VAL_LEN - 1] = '\0';
 
-                
+                /* First value is the default */
                 if (is_first) {
                     strncpy(opt->default_value, opt->values[opt->values_count].value,
                             MAX_OPTION_VAL_LEN - 1);
@@ -155,6 +180,10 @@ void options_ui_set_from_v2_option(const char* key, const char* description,
     pthread_mutex_unlock(&g_options_mutex);
 }
 
+/* ══════════════════════════════════════════════════════════════════════
+ * Get / Set individual option values
+ * ══════════════════════════════════════════════════════════════════════ */
+
 const char* options_ui_get_value(const char* key) {
     if (!key) return NULL;
 
@@ -174,7 +203,7 @@ int options_ui_set_value(const char* key, const char* value) {
     int idx = find_option_index(key);
     if (idx < 0) {
         pthread_mutex_unlock(&g_options_mutex);
-        return -1; 
+        return -1; /* Option not found */
     }
 
     strncpy(g_core_options[idx].value, value, MAX_OPTION_VAL_LEN - 1);
@@ -184,6 +213,11 @@ int options_ui_set_value(const char* key, const char* value) {
     return 0;
 }
 
+/* ══════════════════════════════════════════════════════════════════════
+ * JSON serialization of all options + metadata
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/* Helper: Escape JSON string */
 static void json_escape_string(const char* src, char* dst, size_t dst_size) {
     if (!src || !dst || dst_size < 2) return;
 
@@ -217,8 +251,8 @@ static void json_escape_string(const char* src, char* dst, size_t dst_size) {
 }
 
 char* options_ui_build_json(void) {
-    
-    size_t buffer_size = 64 * 1024; 
+    /* Allocate generous buffer for JSON output */
+    size_t buffer_size = 64 * 1024; /* 64 KB should be enough for core options */
     char* json_buf = (char*)malloc(buffer_size);
     if (!json_buf) return NULL;
 
@@ -274,12 +308,12 @@ char* options_ui_build_json(void) {
             APPEND("{\"value\":\"%s\",\"label\":\"%s\"}", val_esc2, lbl_esc);
         }
 
-        APPEND("]");  
-        APPEND("}");   
+        APPEND("]");  /* Close values array */
+        APPEND("}");   /* Close option object */
     }
 
-    APPEND("]");    
-    APPEND("}");    
+    APPEND("]");    /* Close options array */
+    APPEND("}");    /* Close root object */
 
     pthread_mutex_unlock(&g_options_mutex);
 
@@ -287,6 +321,10 @@ char* options_ui_build_json(void) {
 
     return json_buf;
 }
+
+/* ══════════════════════════════════════════════════════════════════════
+ * FFI accessor — for Dart to retrieve JSON
+ * ══════════════════════════════════════════════════════════════════════ */
 
 const char* options_ui_get_json(void) {
     static char* g_cached_json = NULL;
@@ -300,6 +338,7 @@ const char* options_ui_get_json(void) {
 }
 
 void options_ui_free_json(const char* json) {
-    
+    /* The string returned by options_ui_get_json is cached and freed on next call.
+     * This function is here for API completeness but does nothing. */
     (void)json;
 }

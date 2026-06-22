@@ -1,4 +1,15 @@
+/*
+ * YAGE Libretro Callbacks Module
+ * 
+ * Handles libretro environment callbacks, memory mapping, and logging.
+ * Implements the core libretro API contract for environment negotiation.
+ */
+
 #include "yage_internal.h"
+
+/* ──────────────────────────────────────────────────────────────────
+ * Memory Map + Link Cable Support
+ * ────────────────────────────────────────────────────────────────── */
 
 struct retro_memory_descriptor_lc {
     uint64_t    flags;
@@ -36,12 +47,15 @@ void handle_set_memory_maps(const void* data) {
         if (!d->ptr || d->len == 0) continue;
 
         struct yage_mem_region* r = &g_mem_regions[g_mem_region_count++];
-        r->ptr   = d->ptr;
-        r->start = (uint32_t)d->start;
-        r->len   = (uint32_t)d->len;
+        r->ptr        = d->ptr;
+        r->offset     = (uint32_t)d->offset;
+        r->start      = (uint32_t)d->start;
+        r->select     = (uint32_t)d->select;
+        r->disconnect = (uint32_t)d->disconnect;
+        r->len        = (uint32_t)d->len;
 
         if (d->start == 0xFF00 || d->start == 0x04000000) {
-            g_io_ptr   = (uint8_t*)d->ptr;
+            g_io_ptr   = (uint8_t*)d->ptr + (uint32_t)d->offset;
             g_io_start = (uint32_t)d->start;
             g_io_len   = (uint32_t)d->len;
             LOGI("Link cable: I/O region found at 0x%08X, len=%u, ptr=%p",
@@ -50,6 +64,10 @@ void handle_set_memory_maps(const void* data) {
     }
     LOGI("Link cable: stored %d memory regions", g_mem_region_count);
 }
+
+/* ──────────────────────────────────────────────────────────────────
+ * Libretro Logging
+ * ────────────────────────────────────────────────────────────────── */
 
 typedef void (*retro_log_printf_t)(int level, const char* fmt, ...);
 struct retro_log_callback {
@@ -71,15 +89,44 @@ void retro_log_printf_bridge(int level, const char* fmt, ...) {
     LOGI("[core:%s] %s", lvl, buf);
 }
 
+/* ──────────────────────────────────────────────────────────────────
+ * Address resolution (used by link-cable + memory-read API)
+ * ────────────────────────────────────────────────────────────────── */
+
+static uint8_t* resolve_descriptor_address(const struct yage_mem_region* r,
+                                           uint32_t addr) {
+    uint32_t reduced_address;
+
+    if (!r || !r->ptr || r->len == 0) return NULL;
+
+    if (r->select == 0) {
+        uint64_t start = r->start;
+        uint64_t end = start + r->len;
+        if ((uint64_t)addr < start || (uint64_t)addr >= end) return NULL;
+        reduced_address = addr - r->start;
+    } else {
+        if (((r->start ^ addr) & r->select) != 0) return NULL;
+
+        reduced_address = addr - r->start;
+        uint32_t disconnect_mask = r->disconnect;
+        while (disconnect_mask) {
+            const uint32_t tmp = (disconnect_mask - 1) & ~disconnect_mask;
+            reduced_address =
+                (reduced_address & tmp) | ((reduced_address >> 1) & ~tmp);
+            disconnect_mask = (disconnect_mask & (disconnect_mask - 1)) >> 1;
+        }
+
+        if (reduced_address >= r->len) return NULL;
+    }
+
+    return (uint8_t*)r->ptr + r->offset + reduced_address;
+}
+
 uint8_t* resolve_address(uint32_t addr) {
-    
-    if (g_io_ptr && addr >= g_io_start && addr < g_io_start + g_io_len)
-        return g_io_ptr + (addr - g_io_start);
-    
     for (int i = 0; i < g_mem_region_count; i++) {
         struct yage_mem_region* r = &g_mem_regions[i];
-        if (addr >= r->start && addr < r->start + r->len)
-            return (uint8_t*)r->ptr + (addr - r->start);
+        uint8_t* p = resolve_descriptor_address(r, addr);
+        if (p) return p;
     }
     return NULL;
 }

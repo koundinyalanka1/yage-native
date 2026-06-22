@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="launch_background">#6A3DE8</color>
+    <color name="launch_background">#0D0D1A</color>
+    <!-- YAGE brand purple used for the adaptive launcher-icon background.
+         Matches the legacy ic_launcher.png so every device shows a purple
+         icon with the white controller in the centre. Kept separate from
+         launch_background so the splash screen stays dark. -->
+    <color name="ic_launcher_background_top">#7349E9</color>
+    <color name="ic_launcher_background_bottom">#6A3DE8</color>
 </resources>

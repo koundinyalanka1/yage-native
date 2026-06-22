@@ -9,9 +9,13 @@ import android.net.Uri
 import android.os.Build
 import android.provider.DocumentsContract
 import android.provider.MediaStore
+import android.util.Log
 import android.webkit.MimeTypeMap
+import com.google.android.gms.common.ConnectionResult
+import com.google.android.gms.common.GoogleApiAvailability
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.embedding.engine.FlutterShellArgs
 import io.flutter.plugin.common.MethodChannel
 import android.content.ContentUris
 import java.io.File
@@ -26,27 +30,135 @@ class MainActivity : FlutterFragmentActivity() {
     // Texture bridge for zero-copy frame delivery
     private var textureBridge: YageTextureBridge? = null
 
+    // True when we supplied our own FlutterEngine in provideFlutterEngine()
+    // (TV/32-bit, Impeller off). That engine already registers plugins in its
+    // constructor, so configureFlutterEngine() must NOT call super (which would
+    // register them a second time). The default phone path keeps calling super.
+    private var providedOwnEngine = false
+
     // Callback for picking folder (setup) — returns URI only
     private var pickFolderResultHandler: ((String?) -> Unit)? = null
+
+    // Callback for picking one BIOS file — returns a temporary readable path
+    private var pickBiosFileResultHandler: ((String?) -> Unit)? = null
 
     companion object {
         private const val SAF_IMPORT_FOLDER_CODE = 2001
         private const val SAF_PICK_FOLDER_CODE = 2002
+        private const val SAF_PICK_BIOS_FILE_CODE = 2003
         private val ROM_EXTENSIONS = setOf(
             "gba", "gb", "gbc", "sgb",
             "nes", "unf", "unif",
             "sfc", "smc",
             "sms", "gg", "sg",
             "md", "gen", "smd", "bin",
-            "pce", "sgx", "cue", "chd",
+            "pce", "sgx", "cue",
             "z64", "n64", "v64",
             "ngp", "ngc", "ws", "wsc",
-            "nds", "zip"
+            "a26",
+            "vb",
+            "tic",
+            "p8",
+            // Nintendo DS
+            "nds",
+            // Mattel Intellivision
+            "int", "itv", "rom",
+            // Archives, including PS1 ZIPs with .cue + .bin tracks.
+            "zip"
         )
+
+        /** Battery-save extensions some cores write themselves (e.g. PS1 memory
+         *  card 1 ".mcr"). Kept in sync with EmulatorService._coreManagedSaveExts
+         *  so import (here) and export (Dart) cover the same files. Lowercase,
+         *  including the leading dot. */
+        private val CORE_MANAGED_SAVE_EXTS = setOf(
+            ".srm", ".mcr", ".sra", ".eep", ".fla", ".mpk", ".bram", ".brm"
+        )
+
+        /** Returns true if a filename matches a known ROM extension, including
+         *  PICO-8's `.p8.png` double-extension carts. */
+        fun isRomFilename(name: String): Boolean {
+            val lower = name.lowercase()
+            if (lower.endsWith(".p8.png")) return true
+            val ext = lower.substringAfterLast('.', "")
+            return ext in ROM_EXTENSIONS
+        }
+    }
+
+    /**
+     * Workaround for Android 8.x framework bug where Activity.isTopOfTask()
+     * throws IllegalArgumentException during onResume() IPC. This is a known
+     * AOSP issue with no upstream fix for API 26-27.
+     */
+    override fun onResume() {
+        try {
+            super.onResume()
+        } catch (e: IllegalArgumentException) {
+            // Swallow the framework-level IPC failure. The activity will still
+            // function correctly — isTopOfTask() is only used for internal
+            // bookkeeping (e.g. whether to show the task root activity).
+            android.util.Log.w("MainActivity", "onResume: isTopOfTask IPC failed", e)
+        }
+    }
+
+    /**
+     * Whether this device should opt OUT of Impeller (use the legacy Skia/GLES
+     * renderer). True only on TV / 32-bit devices.
+     *
+     * Impeller (Vulkan) is the modern default and gives the sharpest, smoothest
+     * result on 64-bit phones — forcing Skia there makes the emulator's external
+     * game Texture sample softer and janky ("blurry video" on phones such as the
+     * moto g 60). But Impeller's Vulkan backend crashes at startup on the 32-bit
+     * Mali GPUs in some Android TV boxes (the original Sony BRAVIA crash_dump32
+     * at the home screen). So opt out only there, and keep Impeller everywhere
+     * else.
+     */
+    private fun shouldDisableImpeller(): Boolean {
+        val isTelevision = try {
+            val uiModeManager = getSystemService(Context.UI_MODE_SERVICE) as UiModeManager
+            (uiModeManager.currentModeType and Configuration.UI_MODE_TYPE_MASK) ==
+                Configuration.UI_MODE_TYPE_TELEVISION
+        } catch (e: Exception) {
+            false
+        }
+        // No 64-bit ABI support → old/weak SoC (e.g. the 32-bit Sony BRAVIA)
+        // whose Vulkan driver is the unstable one.
+        val is64BitCapable = (Build.SUPPORTED_64_BIT_ABIS?.isNotEmpty() == true)
+        return isTelevision || !is64BitCapable
+    }
+
+    /**
+     * Per-device renderer selection.
+     *
+     * FlutterFragmentActivity exposes no getFlutterShellArgs() to override (only
+     * FlutterActivity does), so we provide the FlutterEngine ourselves with an
+     * extra shell arg. Returning null keeps the stock engine path (Impeller on)
+     * for phones. For TV/32-bit we build the engine with `--no-enable-impeller`.
+     *
+     * The engine is built with automaticallyRegisterPlugins = true, so it
+     * registers all plugins (Firebase, IAP, etc.) itself in the constructor;
+     * configureFlutterEngine() then skips super for this engine so nothing
+     * double-registers. (The phone path returns null → stock engine + super.)
+     */
+    override fun provideFlutterEngine(context: Context): FlutterEngine? {
+        if (!shouldDisableImpeller()) {
+            Log.i("MainActivity", "Renderer: Impeller enabled (Vulkan)")
+            return null
+        }
+        val shellArgs = FlutterShellArgs.fromIntent(intent)
+        shellArgs.add("--no-enable-impeller")
+        Log.i("MainActivity", "Renderer: Impeller disabled (Skia/GLES) for TV/32-bit")
+        providedOwnEngine = true
+        return FlutterEngine(context, shellArgs.toArray(), true)
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
-        super.configureFlutterEngine(flutterEngine)
+        // Stock (phone) engine registers plugins via super; our own TV/32-bit
+        // engine already did so in its constructor — calling super again would
+        // double-register.
+        if (!providedOwnEngine) {
+            super.configureFlutterEngine(flutterEngine)
+        }
 
         // Initialize texture bridge for zero-copy frame delivery
         textureBridge = YageTextureBridge(flutterEngine)
@@ -64,6 +176,18 @@ class MainActivity : FlutterFragmentActivity() {
                         (getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).getMemoryInfo(memInfo)
                         result.success((memInfo.totalMem / (1024 * 1024)).toInt())
                     }
+                    "checkGooglePlayServices" -> {
+                        // Check if Google Play Services is available and up-to-date.
+                        // Returns "available" if ready, or an error description string.
+                        val availability = GoogleApiAvailability.getInstance()
+                        val status = availability.isGooglePlayServicesAvailable(this)
+                        if (status == ConnectionResult.SUCCESS) {
+                            result.success("available")
+                        } else {
+                            val msg = availability.getErrorString(status)
+                            result.success("unavailable:$status:$msg")
+                        }
+                    }
                     "getOpenFilePath" -> {
                         val path = pendingFilePath
                         pendingFilePath = null
@@ -74,8 +198,13 @@ class MainActivity : FlutterFragmentActivity() {
                     // Opens the system folder picker, recursively scans for ROM files,
                     // copies them to internal storage, returns list of internal paths.
                     "importRomsFromFolder" -> {
+                        // Cancel any previous pending import (user tapped again before
+                        // the first picker dismissed — that Dart future gets null).
+                        importRomsResultHandler?.let { old ->
+                            try { old.invoke(null) } catch (_: IllegalStateException) {}
+                        }
                         importRomsResultHandler = { paths ->
-                            result.success(paths)
+                            try { result.success(paths) } catch (_: IllegalStateException) {}
                         }
                         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
                             addFlags(
@@ -89,8 +218,11 @@ class MainActivity : FlutterFragmentActivity() {
 
                     // ── Pick folder for setup (returns URI only, no import) ──
                     "pickRomsFolder" -> {
+                        pickFolderResultHandler?.let { old ->
+                            try { old.invoke(null) } catch (_: IllegalStateException) {}
+                        }
                         pickFolderResultHandler = { uri ->
-                            result.success(uri)
+                            try { result.success(uri) } catch (_: IllegalStateException) {}
                         }
                         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
                             addFlags(
@@ -100,6 +232,43 @@ class MainActivity : FlutterFragmentActivity() {
                             )
                         }
                         startActivityForResult(intent, SAF_PICK_FOLDER_CODE)
+                    }
+
+                    // ── Pick BIOS file ──
+                    // FilePicker can be over-aggressive on some Android providers and
+                    // show only common documents. Use a direct SAF intent with binary
+                    // MIME hints, then copy the selected URI to cache and return a path.
+                    "pickBiosFile" -> {
+                        pickBiosFileResultHandler?.let { old ->
+                            try { old.invoke(null) } catch (_: IllegalStateException) {}
+                        }
+                        pickBiosFileResultHandler = { path ->
+                            try { result.success(path) } catch (_: IllegalStateException) {}
+                        }
+                        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                            addCategory(Intent.CATEGORY_OPENABLE)
+                            type = "*/*"
+                            putExtra(
+                                Intent.EXTRA_MIME_TYPES,
+                                arrayOf(
+                                    "application/octet-stream",
+                                    "application/x-binary",
+                                    "application/x-rom",
+                                    "application/x-msdos-program",
+                                    "application/x-executable",
+                                    "application/*",
+                                    "*/*"
+                                )
+                            )
+                            addFlags(
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                    or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                            )
+                        }
+                        startActivityForResult(
+                            Intent.createChooser(intent, "Select BIOS file"),
+                            SAF_PICK_BIOS_FILE_CODE
+                        )
                     }
 
                     // ── Import from persisted folder URI (no picker) ──
@@ -365,6 +534,35 @@ class MainActivity : FlutterFragmentActivity() {
 
         val importedPaths = mutableListOf<String>()
 
+        // Guard: if the URI is a single document (not a tree), import it directly.
+        // This happens when the user picks a file from Downloads instead of a folder.
+        if (!DocumentsContract.isTreeUri(treeUri)) {
+            try {
+                val docId = DocumentsContract.getDocumentId(treeUri)
+                // Extract filename from the document ID or URI path
+                val name = docId.substringAfterLast('/').substringAfterLast(':')
+                    .let { java.net.URLDecoder.decode(it, "UTF-8") }
+                    .ifBlank { treeUri.lastPathSegment ?: "unknown" }
+
+                if (isRomFilename(name)) {
+                    val destFile = File(romsDir, name)
+                    if (!destFile.exists()) {
+                        contentResolver.openInputStream(treeUri)?.use { input ->
+                            destFile.outputStream().buffered().use { output ->
+                                input.copyTo(output, bufferSize = 8192)
+                            }
+                        }
+                    }
+                    if (destFile.exists()) {
+                        importedPaths.add(destFile.absolutePath)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w("MainActivity", "importRomsFromTree: single document import failed", e)
+            }
+            return importedPaths
+        }
+
         // Process each ROM as it's found — no full list in memory.
         // Use destFile.exists() per file instead of romsDir.listFiles() to avoid
         // loading thousands of filenames into memory on large libraries.
@@ -567,8 +765,25 @@ class MainActivity : FlutterFragmentActivity() {
 
                     if (mime == DocumentsContract.Document.MIME_TYPE_DIR) continue
 
+                    // Core-managed battery saves the core writes itself (e.g. PS1
+                    // memory card 1 ".mcr"), matched by save extension + ROM base.
+                    // Mirrors EmulatorService._isCoreManagedSaveSibling on the Dart
+                    // side so backup (export) and restore (this import) agree.
+                    val isCoreManagedSave = run {
+                        val dot = name.lastIndexOf('.')
+                        if (dot <= 0) {
+                            false
+                        } else {
+                            val ext = name.substring(dot).lowercase()
+                            val stem = name.substring(0, dot)
+                            ext in CORE_MANAGED_SAVE_EXTS &&
+                                (stem == baseName || stem.startsWith("${baseName}_"))
+                        }
+                    }
+
                     val shouldCopy = name in savePrefixes ||
-                        (name.startsWith(screenshotPrefix) && name.endsWith(screenshotSuffix))
+                        (name.startsWith(screenshotPrefix) && name.endsWith(screenshotSuffix)) ||
+                        isCoreManagedSave
 
                     if (shouldCopy) {
                         try {
@@ -632,29 +847,25 @@ class MainActivity : FlutterFragmentActivity() {
                                 if (childCursor.moveToFirst()) {
                                     scanTreeRecursive(treeUri, docId, docId, onRomFound)
                                 } else {
-                                    val ext = name.substringAfterLast('.', "").lowercase()
-                                    if (ext in ROM_EXTENSIONS) {
+                                    if (isRomFilename(name)) {
                                         val fileUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
                                         onRomFound(RomEntry(fileUri, name, currentDirAsParent))
                                     }
                                 }
                             } ?: run {
-                                val ext = name.substringAfterLast('.', "").lowercase()
-                                if (ext in ROM_EXTENSIONS) {
+                                if (isRomFilename(name)) {
                                     val fileUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
                                     onRomFound(RomEntry(fileUri, name, currentDirAsParent))
                                 }
                             }
                         } catch (_: Exception) {
-                            val ext = name.substringAfterLast('.', "").lowercase()
-                            if (ext in ROM_EXTENSIONS) {
+                            if (isRomFilename(name)) {
                                 val fileUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
                                 onRomFound(RomEntry(fileUri, name, currentDirAsParent))
                             }
                         }
                     } else {
-                        val ext = name.substringAfterLast('.', "").lowercase()
-                        if (ext in ROM_EXTENSIONS) {
+                        if (isRomFilename(name)) {
                             val fileUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
                             onRomFound(RomEntry(fileUri, name, currentDirAsParent))
                         }
@@ -692,7 +903,8 @@ class MainActivity : FlutterFragmentActivity() {
         }
 
         // Build selection: DISPLAY_NAME LIKE '%.gba' OR DISPLAY_NAME LIKE '%.gb' ...
-        val likePatterns = ROM_EXTENSIONS.map { "%.$it" }
+        // Add `%.p8.png` for PICO-8 carts (double extension).
+        val likePatterns = ROM_EXTENSIONS.map { "%.$it" } + "%.p8.png"
         val selection = likePatterns.joinToString(" OR ") {
             "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ?"
         }
@@ -765,14 +977,62 @@ class MainActivity : FlutterFragmentActivity() {
         }
     }
 
+    /**
+     * Copy a picked BIOS document to a short-lived cache file so Dart can import
+     * it via the existing file-path based BIOS service.
+     */
+    private fun copyBiosUriToCache(uri: Uri): String? {
+        if (uri.scheme == "file") return uri.path
+
+        val biosDir = File(cacheDir, "bios_picker")
+        if (!biosDir.exists()) biosDir.mkdirs()
+        biosDir.listFiles()?.forEach { file ->
+            try {
+                file.delete()
+            } catch (_: Exception) {}
+        }
+
+        val originalName = getFileName(uri) ?: "bios_${System.currentTimeMillis()}.bin"
+        val safeName = originalName.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+        val destFile = File(biosDir, safeName)
+
+        return try {
+            contentResolver.openInputStream(uri)?.use { input ->
+                destFile.outputStream().buffered().use { output ->
+                    input.copyTo(output, bufferSize = 8192)
+                }
+                destFile.absolutePath
+            } ?: null
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
+
     // ══════════════════════════════════════════════════════════════
     //  Activity result handling
     // ══════════════════════════════════════════════════════════════
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        // Handle our custom SAF request codes BEFORE super, so that
+        // flutter plugins (e.g. file_picker) don't receive them and crash
+        // trying to interpret a tree URI as a document URI.
+        if (requestCode == SAF_IMPORT_FOLDER_CODE ||
+            requestCode == SAF_PICK_FOLDER_CODE ||
+            requestCode == SAF_PICK_BIOS_FILE_CODE) {
+            handleCustomSafResult(requestCode, resultCode, data)
+            return
+        }
         super.onActivityResult(requestCode, resultCode, data)
+    }
 
+    private fun handleCustomSafResult(requestCode: Int, resultCode: Int, data: Intent?) {
         if (requestCode == SAF_IMPORT_FOLDER_CODE) {
+            // Atomically grab and null the handler so it can only fire once.
+            val handler = importRomsResultHandler
+            importRomsResultHandler = null
+            if (handler == null) return
+
             if (resultCode == RESULT_OK && data?.data != null) {
                 val treeUri = data.data!!
 
@@ -787,17 +1047,28 @@ class MainActivity : FlutterFragmentActivity() {
                 Thread {
                     val importedPaths = importRomsFromTree(treeUri)
                     runOnUiThread {
-                        importRomsResultHandler?.invoke(importedPaths)
-                        importRomsResultHandler = null
+                        try {
+                            handler.invoke(importedPaths)
+                        } catch (e: IllegalStateException) {
+                            Log.w("MainActivity", "SAF_IMPORT reply already submitted", e)
+                        }
                     }
                 }.start()
             } else {
-                importRomsResultHandler?.invoke(null)
-                importRomsResultHandler = null
+                try {
+                    handler.invoke(null)
+                } catch (e: IllegalStateException) {
+                    Log.w("MainActivity", "SAF_IMPORT cancel reply already submitted", e)
+                }
             }
+            return
         }
 
         if (requestCode == SAF_PICK_FOLDER_CODE) {
+            val handler = pickFolderResultHandler
+            pickFolderResultHandler = null
+            if (handler == null) return
+
             if (resultCode == RESULT_OK && data?.data != null) {
                 val treeUri = data.data!!
 
@@ -808,11 +1079,51 @@ class MainActivity : FlutterFragmentActivity() {
                     )
                 } catch (_: Exception) {}
 
-                pickFolderResultHandler?.invoke(treeUri.toString())
+                try {
+                    handler.invoke(treeUri.toString())
+                } catch (e: IllegalStateException) {
+                    Log.w("MainActivity", "SAF_PICK_FOLDER reply already submitted", e)
+                }
             } else {
-                pickFolderResultHandler?.invoke(null)
+                try {
+                    handler.invoke(null)
+                } catch (e: IllegalStateException) {
+                    Log.w("MainActivity", "SAF_PICK_FOLDER cancel reply already submitted", e)
+                }
             }
-            pickFolderResultHandler = null
+            return
+        }
+
+        if (requestCode == SAF_PICK_BIOS_FILE_CODE) {
+            val handler = pickBiosFileResultHandler
+            pickBiosFileResultHandler = null
+            if (handler == null) return
+
+            if (resultCode == RESULT_OK && data?.data != null) {
+                val fileUri = data.data!!
+                try {
+                    contentResolver.takePersistableUriPermission(
+                        fileUri, Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                } catch (_: Exception) {}
+
+                Thread {
+                    val path = copyBiosUriToCache(fileUri)
+                    runOnUiThread {
+                        try {
+                            handler.invoke(path)
+                        } catch (e: IllegalStateException) {
+                            Log.w("MainActivity", "SAF_PICK_BIOS reply already submitted", e)
+                        }
+                    }
+                }.start()
+            } else {
+                try {
+                    handler.invoke(null)
+                } catch (e: IllegalStateException) {
+                    Log.w("MainActivity", "SAF_PICK_BIOS cancel reply already submitted", e)
+                }
+            }
         }
     }
 }

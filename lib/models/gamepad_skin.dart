@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../utils/theme.dart';
 
+/// Available gamepad visual themes
 enum GamepadSkinType {
   classic,
   retro,
@@ -9,6 +10,7 @@ enum GamepadSkinType {
   neon,
 }
 
+/// Human-readable names for each skin
 extension GamepadSkinTypeName on GamepadSkinType {
   String get label => switch (this) {
     GamepadSkinType.classic => 'Classic',
@@ -32,27 +34,41 @@ extension GamepadSkinTypeName on GamepadSkinType {
   };
 }
 
+/// Resolved visual parameters for a gamepad skin.
+/// Call [GamepadSkinData.resolve] at build time so it picks up the current
+/// theme automatically via the provided [AppColorTheme].
 class GamepadSkinData {
+  // ── Button normal state ──
   final Color buttonFill;
   final Color buttonBorder;
   final double buttonBorderWidth;
   final Color textNormal;
+
+  // ── Button pressed state ──
   final Color buttonFillPressed;
   final Color buttonBorderPressed;
   final Color textPressed;
+
+  // ── D-pad ──
   final Color dpadBackground;
   final Color dpadBorder;
   final double dpadBorderWidth;
   final Color dpadCenter;
   final double dpadRadius;
+
+  // ── Joystick ──
   final Color joystickBg;
   final Color joystickBorder;
   final double joystickBorderWidth;
   final Color stickColor;
   final Color stickBorder;
-  final Color? stickHighlight; 
+  final Color? stickHighlight; // inner dot / gradient highlight
+
+  // ── Shadows / glow ──
   final List<BoxShadow> normalShadows;
   final List<BoxShadow> pressedShadows;
+
+  // ── Shape ──
   final double buttonRadius;
 
   const GamepadSkinData({
@@ -79,6 +95,7 @@ class GamepadSkinData {
     required this.buttonRadius,
   });
 
+  /// Resolve a skin type into concrete paint parameters using the given theme.
   static GamepadSkinData resolve(GamepadSkinType type, AppColorTheme colors) {
     return switch (type) {
       GamepadSkinType.classic => _classic(colors),
@@ -87,6 +104,10 @@ class GamepadSkinData {
       GamepadSkinType.neon => _neon(colors),
     };
   }
+
+  // ──────────────────────────────────────────────
+  // Classic  — solid filled surfaces (current look)
+  // ──────────────────────────────────────────────
   static GamepadSkinData _classic(AppColorTheme colors) {
     return GamepadSkinData(
       buttonFill: colors.surface.withAlpha(220),
@@ -110,6 +131,10 @@ class GamepadSkinData {
       buttonRadius: 12,
     );
   }
+
+  // ──────────────────────────────────────────────
+  // Retro  — Game Boy grey, thick dark borders
+  // ──────────────────────────────────────────────
   static GamepadSkinData _retro() {
     const greyLight = Color(0xFFC4C4B8);
     const greyMed = Color(0xFF9E9E92);
@@ -156,6 +181,10 @@ class GamepadSkinData {
       ],
     );
   }
+
+  // ──────────────────────────────────────────────
+  // Minimal  — outlines only, transparent fills
+  // ──────────────────────────────────────────────
   static GamepadSkinData _minimal(AppColorTheme colors) {
     return GamepadSkinData(
       buttonFill: Colors.transparent,
@@ -179,6 +208,10 @@ class GamepadSkinData {
       buttonRadius: 12,
     );
   }
+
+  // ──────────────────────────────────────────────
+  // Neon  — dark fills, bright borders, glow shadows
+  // ──────────────────────────────────────────────
   static GamepadSkinData _neon(AppColorTheme colors) {
     final neonColor = colors.accent;
     final neonAlt = colors.primary;

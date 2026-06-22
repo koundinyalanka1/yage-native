@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'package:flutter/foundation.dart';
@@ -10,6 +12,7 @@ import '../services/ad_service.dart';
 import '../services/consent_service.dart';
 import '../services/game_database.dart';
 import '../services/remove_ads_purchase_service.dart';
+import '../services/retro_achievements_service.dart';
 import '../services/settings_service.dart';
 import '../services/tv_http_server.dart';
 import '../utils/device_memory.dart';
@@ -17,6 +20,22 @@ import '../utils/theme.dart';
 import '../utils/tv_detector.dart';
 import 'home_screen.dart';
 
+/// Splash screen shown at app startup.
+///
+/// Responsibilities:
+///   1. Display branding (logo + app name) immediately on first frame.
+///   2. Run all heavy initialisation tasks AFTER the first frame renders
+///      to avoid ANR on slow devices (especially Android TV):
+///      • Firebase
+///      • Game database (SQLite)
+///      • TV detection
+///      • Device memory detection
+///      • AdMob (mobile only — skipped on TV)
+///   3. Build the full app with providers only after init completes.
+///   4. Navigate to [HomeScreen] once providers are ready.
+///
+/// A minimum display time of 1.5 s ensures the logo is seen even when
+/// everything loads instantly (cached data on subsequent launches).
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
 
@@ -36,6 +55,8 @@ class _SplashScreenState extends State<SplashScreen>
   @override
   void initState() {
     super.initState();
+
+    // Fade-in animation for the logo / text
     _fadeController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 600),
@@ -45,6 +66,8 @@ class _SplashScreenState extends State<SplashScreen>
       curve: Curves.easeOut,
     );
     _fadeController.forward();
+
+    // Kick off async init after the first frame to avoid ANR
     WidgetsBinding.instance.addPostFrameCallback((_) => _initialize());
   }
 
@@ -52,18 +75,54 @@ class _SplashScreenState extends State<SplashScreen>
     final stopwatch = Stopwatch()..start();
 
     try {
+      // ── Required-before-first-frame init (all fast / local) ──────
+      // Everything in this group must complete before we navigate to
+      // HomeScreen because the home UI depends on the results:
+      //   • Firebase (Crashlytics hook-up) — capped at 4 s so a slow
+      //     network never blocks the app from starting.
+      //   • GameDatabase — home lists games from SQLite.
+      //   • TvDetector — theme and UI scaling.
+      //   • initDeviceMemory — used by home / settings.
+      //   • RemoveAdsPurchaseService.loadCachedEntitlementOnly — pure
+      //     SharedPreferences read; decides whether to show banner ads.
+      //   • AdService.ensureUnlockStatesLoaded — local prefs; cheats /
+      //     slot-unlock UI reads these.
       await Future.wait([
-        _initFirebase(),
-        _initDatabase(),
+        _initFirebase().timeout(
+          const Duration(seconds: 4),
+          onTimeout: () {
+            debugPrint(
+              'SplashScreen: Firebase init timed out — continuing '
+              'without it (no analytics this session)',
+            );
+          },
+        ),
         TvDetector.initialize(),
         initDeviceMemory(),
       ]);
 
-      await RemoveAdsPurchaseService.instance.initialize();
-      if (!TvDetector.isTV && !RemoveAdsPurchaseService.instance.adsRemoved) {
-        await AdService.instance.initializeWithConsent(ConsentService.instance);
+      await _initDatabase(migrateLegacyData: !TvDetector.isTV);
+
+      if (!TvDetector.isTV) {
+        await Future.wait([
+          RemoveAdsPurchaseService.instance.loadCachedEntitlementOnly(),
+          AdService.instance.ensureUnlockStatesLoaded(),
+        ]);
       }
-      await AdService.instance.ensureUnlockStatesLoaded();
+
+      // ── Deferred init (networked; runs AFTER navigation) ─────────
+      // These used to block the splash on cold starts with slow Wi-Fi:
+      //   • UMP consent round-trip (even for non-EEA users)
+      //   • MobileAds.initialize() — mediation adapter handshakes
+      //   • IAP Play-Billing: isAvailable / queryProductDetails /
+      //     restorePurchases
+      // They're fire-and-forget; services update their own state and
+      // notify listeners when ready, so any UI depending on them will
+      // rebuild the moment the network call returns.
+      unawaited(_deferredNetworkInit());
+
+      // ── Enforce minimum display time for branding ────────
+      // TV users prioritize startup speed over branding impression.
       final elapsed = stopwatch.elapsedMilliseconds;
       final minDisplayMs = TvDetector.isTV ? 800 : 1500;
       if (elapsed < minDisplayMs) {
@@ -85,26 +144,107 @@ class _SplashScreenState extends State<SplashScreen>
     }
   }
 
+  /// Best-effort initialization of networked services.
+  ///
+  /// Runs outside the splash critical path. Each step is guarded so a
+  /// timeout or failure in one doesn't block the others, and none of them
+  /// can ever re-throw into the splash flow.
+  Future<void> _deferredNetworkInit() async {
+    // Give the UI a frame to paint HomeScreen before we kick off ads /
+    // consent — this is the whole point of running off the splash path.
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    if (TvDetector.isTV) return;
+
+    final iap = RemoveAdsPurchaseService.instance;
+    unawaited(
+      iap.initializeStoreInBackground().catchError((Object e) {
+        debugPrint('SplashScreen: deferred IAP init failed — $e');
+      }),
+    );
+
+    // If the user has already paid to remove ads (cached locally), skip
+    // the UMP / AdMob round-trips entirely.
+    if (iap.adsRemoved || TvDetector.isTV) return;
+
+    unawaited(
+      AdService.instance
+          .initializeWithConsent(ConsentService.instance)
+          .timeout(
+            const Duration(seconds: 8),
+            onTimeout: () {
+              debugPrint(
+                'SplashScreen: deferred AdMob/UMP init timed out — '
+                'ads will retry on next launch',
+              );
+            },
+          )
+          .catchError((Object e) {
+            debugPrint('SplashScreen: deferred AdMob init failed — $e');
+          }),
+    );
+  }
+
   Future<void> _initFirebase() async {
     try {
       await Firebase.initializeApp();
 
       if (!kDebugMode) {
-        FlutterError.onError =
-            FirebaseCrashlytics.instance.recordFlutterFatalError;
+        FlutterError.onError = (FlutterErrorDetails details) {
+          // Downgrade network errors from image loading to non-fatal.
+          // SocketException during image fetch (e.g. RetroAchievements badges)
+          // should not be recorded as a fatal crash.
+          final exception = details.exception;
+          final isImageNetworkError =
+              details.stack.toString().contains('ImageStreamCompleter') ||
+              details.library == 'image resource service';
+          final isSocketError =
+              exception.toString().contains('SocketException') ||
+              exception.toString().contains('Connection reset') ||
+              exception.toString().contains('Connection refused') ||
+              exception.toString().contains('connection abort') ||
+              exception.toString().contains('HttpException') ||
+              exception.toString().contains('HandshakeException');
+
+          if (isImageNetworkError || isSocketError) {
+            // Record as non-fatal so we still see it in dashboard
+            FirebaseCrashlytics.instance.recordError(
+              details.exception,
+              details.stack,
+              reason: details.library ?? 'network error',
+              fatal: false,
+            );
+          } else {
+            FirebaseCrashlytics.instance.recordFlutterFatalError(details);
+          }
+        };
         PlatformDispatcher.instance.onError = (error, stack) {
-          FirebaseCrashlytics.instance.recordError(error, stack, fatal: true);
+          // Downgrade network errors to non-fatal at platform level too
+          final desc = error.toString();
+          final isNetworkError =
+              desc.contains('SocketException') ||
+              desc.contains('Connection reset') ||
+              desc.contains('Connection refused') ||
+              desc.contains('connection abort') ||
+              desc.contains('HttpException') ||
+              desc.contains('HandshakeException');
+          FirebaseCrashlytics.instance.recordError(
+            error,
+            stack,
+            fatal: !isNetworkError,
+          );
           return true;
         };
       }
     } catch (e) {
       debugPrint('Firebase init failed — running without analytics: $e');
+      // Non-fatal: continue without Firebase
     }
   }
 
-  Future<void> _initDatabase() async {
+  Future<void> _initDatabase({bool migrateLegacyData = true}) async {
     final db = GameDatabase();
-    await db.open();
+    await db.open(migrateLegacyData: migrateLegacyData);
     _gameDatabase = db;
   }
 
@@ -114,20 +254,31 @@ class _SplashScreenState extends State<SplashScreen>
     super.dispose();
   }
 
+  // ═════════════════════════════════════════════════════════════════════
+  //  UI
+  // ═════════════════════════════════════════════════════════════════════
+
   @override
   Widget build(BuildContext context) {
+    // Once initialized, wrap in providers and navigate to home
     if (_initialized && _gameDatabase != null) {
       return _buildFullApp();
     }
+
+    // Show error state if init failed
     if (_errorMessage != null) {
       return _buildErrorScreen();
     }
+
+    // Show splash while loading
     return _buildSplashUI();
   }
 
+  /// Build the full app with all providers after initialization.
   Widget _buildFullApp() {
     return AppProviders(
       gameDatabase: _gameDatabase!,
+      deferStartupLoads: TvDetector.isTV,
       child: _ThemedApp(fadeAnimation: _fadeAnimation),
     );
   }
@@ -175,6 +326,7 @@ class _SplashScreenState extends State<SplashScreen>
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              // ── Glowing app icon ─────────────────────────────────
               Container(
                 width: 120,
                 height: 120,
@@ -205,6 +357,8 @@ class _SplashScreenState extends State<SplashScreen>
               ),
 
               const SizedBox(height: 28),
+
+              // ── App name ─────────────────────────────────────────
               Text(
                 'RetroPal',
                 style: TextStyle(
@@ -216,6 +370,8 @@ class _SplashScreenState extends State<SplashScreen>
               ),
 
               const SizedBox(height: 8),
+
+              // ── Tagline ──────────────────────────────────────────
               Text(
                 'Emulator to play Retro Games',
                 style: TextStyle(
@@ -226,6 +382,8 @@ class _SplashScreenState extends State<SplashScreen>
               ),
 
               const SizedBox(height: 48),
+
+              // ── Subtle loading indicator ─────────────────────────
               SizedBox(
                 width: 28,
                 height: 28,
@@ -242,6 +400,22 @@ class _SplashScreenState extends State<SplashScreen>
   }
 }
 
+/// The fully themed app widget, shown after initialization.
+///
+/// Listens to [SettingsService] for theme changes and applies system UI
+/// colors accordingly. Also maps TV remote buttons to activation intents.
+///
+/// **Nested [MaterialApp]**: The bootstrap [MaterialApp] in [RetroPalAppBootstrap]
+/// keeps [SplashScreen]; once init completes, this widget builds a **second**
+/// [MaterialApp] for the real UI. On Android TV, running without this inner
+/// [MaterialApp] has been observed to get the process killed by the system—so
+/// the nesting is intentional, not an oversight.
+///
+/// **Navigator**: Two apps means two [Navigator]s. [showDialog] defaults to
+/// `useRootNavigator: true` and would attach to the **outer** navigator while
+/// [HomeScreen] lives under the **inner** one—mismatched [Navigator.pop] can
+/// remove the home route (black screen). App dialogs that sit above
+/// [HomeScreen] must use `useRootNavigator: false` (and matching pops).
 class _ThemedApp extends StatefulWidget {
   final Animation<double> fadeAnimation;
 
@@ -257,6 +431,8 @@ class _ThemedAppState extends State<_ThemedApp> {
   @override
   void initState() {
     super.initState();
+
+    // Stop HTTP server when app exits or goes to background
     _lifecycleListener = AppLifecycleListener(
       onDetach: _shutdownHttpServer,
       onInactive: _shutdownHttpServer,
@@ -283,6 +459,8 @@ class _ThemedAppState extends State<_ThemedApp> {
         final colors = AppThemes.getById(
           settingsService.settings.selectedTheme,
         );
+
+        // Update system nav bar color to match theme
         SystemChrome.setSystemUIOverlayStyle(
           SystemUiOverlayStyle(
             statusBarColor: Colors.transparent,
@@ -291,6 +469,10 @@ class _ThemedAppState extends State<_ThemedApp> {
             systemNavigationBarIconBrightness: Brightness.light,
           ),
         );
+
+        // Map typical Android TV remote and gamepad "Select" buttons to
+        // standard activation. This makes all standard Flutter buttons
+        // clickable via D-Pad Center or Gamepad A.
         return Shortcuts(
           shortcuts: <LogicalKeySet, Intent>{
             LogicalKeySet(LogicalKeyboardKey.select): const ActivateIntent(),
@@ -301,12 +483,15 @@ class _ThemedAppState extends State<_ThemedApp> {
             LogicalKeySet(LogicalKeyboardKey.numpadEnter):
                 const ActivateIntent(),
           },
+          // Inner MaterialApp: required for stable TV launches (see [_ThemedApp] doc).
           child: MaterialApp(
             title: 'RetroPal',
             debugShowCheckedModeBanner: false,
             theme: YageTheme.darkTheme(colors),
             builder: TvDetector.isTV
                 ? (context, child) {
+                    // 10-foot UI: scale all text ~1.3x for TV viewing distance
+                    // and add overscan-safe padding (many TVs crop 3-5% edges).
                     final mq = MediaQuery.of(context);
                     return MediaQuery(
                       data: mq.copyWith(
@@ -328,6 +513,12 @@ class _ThemedAppState extends State<_ThemedApp> {
   }
 }
 
+/// Splash placeholder shown briefly while providers finish loading.
+///
+/// Once [SettingsService.whenLoaded] completes, this widget navigates to
+/// [HomeScreen] via [Navigator.pushReplacement]. This avoids the fragile
+/// pattern of swapping [MaterialApp.home] — which does not reliably
+/// replace the displayed route in Navigator 1.0's route stack.
 class _SplashPlaceholder extends StatefulWidget {
   final Animation<double> fadeAnimation;
   final AppColorTheme colors;
@@ -348,14 +539,43 @@ class _SplashPlaceholderState extends State<_SplashPlaceholder> {
   }
 
   Future<void> _waitAndNavigate() async {
-    final settings = context.read<SettingsService>();
-    await settings.whenLoaded;
+    // Gate the first HomeScreen frame on two things:
+    //   1. SettingsService loaded — so the full theme is applied.
+    //   2. RetroAchievements login state restored — so a returning, logged-in
+    //      user sees achievement-gated UI (and game launches that enable
+    //      achievements) correctly on the very first frame, instead of after a
+    //      late rebuild. We await `whenLocallyReady`, which resolves as soon as
+    //      the stored session is read and does NOT wait for the network
+    //      profile refresh.
+    //
+    // Both are wrapped in a hard timeout and a try/catch so a slow/offline
+    // device — or a missing provider — can never strand the user on the
+    // splash. If the gate is released early we navigate anyway; the services
+    // are ChangeNotifiers, so the home UI still updates reactively once they
+    // settle.
+    if (!TvDetector.isTV) {
+      try {
+        final settings = context.read<SettingsService>();
+        final raService = context.read<RetroAchievementsService>();
+        await Future.wait(<Future<void>>[
+          settings.whenLoaded,
+          raService.whenLocallyReady,
+        ]).timeout(const Duration(seconds: 5));
+      } catch (e) {
+        debugPrint(
+          'SplashScreen: startup gate released early ($e) — continuing',
+        );
+      }
+    }
 
     if (!mounted || _navigated) return;
     _navigated = true;
+
+    // pushReplacement on the INNER navigator — this context is inside the
+    // inner MaterialApp, so Navigator.of(context) finds the right one.
     Navigator.of(context).pushReplacement(
       PageRouteBuilder(
-        pageBuilder: (_, __, ___) => const HomeScreen(),
+        pageBuilder: (_, _, _) => const HomeScreen(),
         transitionDuration: Duration.zero,
         reverseTransitionDuration: Duration.zero,
       ),

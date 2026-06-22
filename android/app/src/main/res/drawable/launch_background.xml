@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- App launch window: dark app-theme background (#0D0D1A, matches the
+     Flutter splash screen) with the app icon centered. Replaces the old
+     bare purple (#6A3DE8) flash. -->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- Background color #6A3DE8 -->
     <item android:drawable="@color/launch_background" />
-
-    <!-- App icon in center -->
     <item>
         <bitmap
             android:gravity="center"

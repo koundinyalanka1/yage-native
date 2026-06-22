@@ -15,6 +15,8 @@ import '../services/tv_http_server.dart';
 import '../utils/theme.dart';
 import 'tv_focusable.dart';
 
+/// Dialog for TV that shows HTTP server upload instructions.
+/// Users can upload ROMs from their phone/computer via a web browser.
 class TvHttpUploadDialog extends StatefulWidget {
   final BuildContext parentContext;
   final bool allowSkip;
@@ -38,7 +40,10 @@ class _TvHttpUploadDialogState extends State<TvHttpUploadDialog> {
   int _importedCount = 0;
   Timer? _scanTimer;
 
+  /// Prevents double [Done] / concurrent closes; [pop] after async must be guarded.
   bool _didPop = false;
+
+  // Focus nodes for TV navigation
   final FocusScopeNode _dialogScopeNode = FocusScopeNode(
     debugLabel: 'TvHttpUploadScope',
   );
@@ -73,6 +78,8 @@ class _TvHttpUploadDialogState extends State<TvHttpUploadDialog> {
           _serverUrl = url;
           _isStarting = false;
         });
+
+        // Start periodic scanning for new ROMs (every 5 seconds to reduce CPU)
         _startScanning();
       }
     } catch (e) {
@@ -86,6 +93,7 @@ class _TvHttpUploadDialogState extends State<TvHttpUploadDialog> {
   }
 
   void _startScanning() {
+    // Scan less frequently (5 seconds) to reduce main thread work
     _scanTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       if (!_isScanning) {
         _scanForNewRoms();
@@ -93,6 +101,7 @@ class _TvHttpUploadDialogState extends State<TvHttpUploadDialog> {
     });
   }
 
+  /// Scan for new ROMs in background isolate
   Future<void> _scanForNewRoms({bool isManual = false}) async {
     if (_isScanning) return;
     _isScanning = true;
@@ -113,7 +122,11 @@ class _TvHttpUploadDialogState extends State<TvHttpUploadDialog> {
       if (!widget.parentContext.mounted) return;
 
       final library = widget.parentContext.read<GameLibraryService>();
+
+      // Get existing paths
       final existingPaths = library.games.map((g) => g.path).toSet();
+
+      // Scan for new ROM files in compute isolate to avoid blocking UI
       final newFiles = await compute(
         _scanDirectoryIsolate,
         _ScanParams(dirPath: romsPath, existingPaths: existingPaths),
@@ -121,6 +134,9 @@ class _TvHttpUploadDialogState extends State<TvHttpUploadDialog> {
 
       if (newFiles.isEmpty) return;
       if (!widget.parentContext.mounted) return;
+
+      // Add new games (this must be on main thread due to DB access)
+      // Re-read existing paths in case another scan added games while isolate ran
       final currentPaths = library.games.map((g) => g.path).toSet();
       final coverService = widget.parentContext.read<CoverArtService>();
 
@@ -137,6 +153,8 @@ class _TvHttpUploadDialogState extends State<TvHttpUploadDialog> {
               _importedCount += 1;
             });
           }
+
+          // Instantly sync cover art before proceeding to the next file
           if (game.coverPath == null) {
             try {
               final path = await coverService.fetchCoverArt(game);
@@ -147,6 +165,8 @@ class _TvHttpUploadDialogState extends State<TvHttpUploadDialog> {
               debugPrint('TvHttpUploadDialog: failed to fetch cover art — $e');
             }
           }
+
+          // Yield slightly to maintain 60fps UI while downloading
           await Future.delayed(const Duration(milliseconds: 100));
         }
       }
@@ -160,13 +180,19 @@ class _TvHttpUploadDialogState extends State<TvHttpUploadDialog> {
     }
   }
 
+  /// Manual scan triggered by "Scan Now" button
   Future<void> _manualScan() async {
     await _scanForNewRoms(isManual: true);
   }
 
+  /// [showDialog] uses the root navigator by default; popping after [await] can run
+  /// when the route is already gone (double Done, focus + button, etc.) — that
+  /// throws inside [NavigatorState.pop] (`Bad state: No element`).
   void _safePop(bool? value) {
     if (_didPop || !mounted) return;
     try {
+      // Prefer inner navigator — matches [showDialog(useRootNavigator: false)]
+      // used from Home / ROM setup (nested MaterialApp in SplashScreen).
       final nav =
           Navigator.maybeOf(context, rootNavigator: false) ??
           Navigator.maybeOf(context);
@@ -181,9 +207,12 @@ class _TvHttpUploadDialogState extends State<TvHttpUploadDialog> {
 
   Future<void> _done() async {
     if (_didPop) return;
+    // Stop periodic scanning to prevent race with the final scan
     _scanTimer?.cancel();
     _scanTimer = null;
     final parentCtx = widget.parentContext;
+
+    // Final scan to catch any uploads since the last periodic scan
     await _scanForNewRoms(isManual: true);
     if (!mounted || _didPop) return;
     if (parentCtx.mounted) {
@@ -206,6 +235,8 @@ class _TvHttpUploadDialogState extends State<TvHttpUploadDialog> {
       node: _dialogScopeNode,
       autofocus: true,
       onFocusChange: (focused) {
+        // Aggressively trap focus: if the dialog is visible but loses focus
+        // (e.g. background list rebuilt and tried to steal it), pull it back!
         if (!focused && mounted) {
           Future.microtask(() {
             if (mounted) _dialogScopeNode.requestFocus();
@@ -248,6 +279,7 @@ class _TvHttpUploadDialogState extends State<TvHttpUploadDialog> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    // Title
                     Row(
                       children: [
                         Icon(Icons.upload_file, color: colors.accent, size: 28),
@@ -265,6 +297,8 @@ class _TvHttpUploadDialogState extends State<TvHttpUploadDialog> {
                       ],
                     ),
                     const SizedBox(height: 20),
+
+                    // Content
                     Flexible(
                       child: SingleChildScrollView(
                         child: _buildContent(colors),
@@ -272,6 +306,8 @@ class _TvHttpUploadDialogState extends State<TvHttpUploadDialog> {
                     ),
 
                     const SizedBox(height: 20),
+
+                    // Buttons at the bottom
                     _buildButtons(colors),
                   ],
                 ),
@@ -326,11 +362,14 @@ class _TvHttpUploadDialogState extends State<TvHttpUploadDialog> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        // Instructions
         Text(
           'On your phone or computer, open a web browser and go to:',
           style: TextStyle(color: colors.textSecondary, fontSize: 15),
         ),
         const SizedBox(height: 12),
+
+        // Server URL
         Container(
           width: double.infinity,
           padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
@@ -367,6 +406,8 @@ class _TvHttpUploadDialogState extends State<TvHttpUploadDialog> {
           ),
         ),
         const SizedBox(height: 20),
+
+        // Quick steps (condensed)
         Text(
           'Quick Steps:',
           style: TextStyle(
@@ -393,6 +434,8 @@ class _TvHttpUploadDialogState extends State<TvHttpUploadDialog> {
         ),
 
         const SizedBox(height: 12),
+
+        // ZIP warning
         Container(
           padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
           decoration: BoxDecoration(
@@ -416,10 +459,14 @@ class _TvHttpUploadDialogState extends State<TvHttpUploadDialog> {
         ),
 
         const SizedBox(height: 10),
+
+        // Supported formats (smaller)
         Text(
-          'Supported: .gba .gb .gbc .nes .unf .unif .sfc .smc .sg .sms .gg .md .gen .smd .bin .pce .sgx .cue .chd .z64 .n64 .v64 .ngp .ngc .ws .wsc',
+          'Supported: .gba .gb .gbc .nes .unf .unif .sfc .smc .sg .sms .gg .md .gen .smd .bin .pce .sgx .cue .z64 .n64 .v64 .ngp .ngc .ws .wsc .a26 .vb .tic .p8 .p8.png',
           style: TextStyle(color: colors.textMuted, fontSize: 12),
         ),
+
+        // Import count
         if (_importedCount > 0) ...[
           const SizedBox(height: 12),
           Container(
@@ -503,9 +550,12 @@ class _TvHttpUploadDialogState extends State<TvHttpUploadDialog> {
         ),
       );
     }
+
+    // Use Column layout for TV - easier to navigate with D-pad
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
+        // Scan Now button
         SizedBox(
           width: double.infinity,
           child: TvFocusable(
@@ -538,6 +588,8 @@ class _TvHttpUploadDialogState extends State<TvHttpUploadDialog> {
           ),
         ),
         const SizedBox(height: 12),
+
+        // Done button
         SizedBox(
           width: double.infinity,
           child: TvFocusable(
@@ -563,6 +615,7 @@ class _TvHttpUploadDialogState extends State<TvHttpUploadDialog> {
   }
 }
 
+/// Parameters for the isolate scan function
 class _ScanParams {
   final String dirPath;
   final Set<String> existingPaths;
@@ -570,12 +623,14 @@ class _ScanParams {
   _ScanParams({required this.dirPath, required this.existingPaths});
 }
 
+/// Scan directory for ROM files in a separate isolate
 List<String> _scanDirectoryIsolate(_ScanParams params) {
   final newFiles = <String>[];
   final romExtensions = {
     '.gba',
     '.gbc',
     '.gb',
+    '.sgb',
     '.nes',
     '.unf',
     '.unif',
@@ -589,7 +644,6 @@ List<String> _scanDirectoryIsolate(_ScanParams params) {
     '.pce',
     '.sgx',
     '.cue',
-    '.chd',
     '.z64',
     '.n64',
     '.v64',
@@ -599,6 +653,17 @@ List<String> _scanDirectoryIsolate(_ScanParams params) {
     '.ngc',
     '.ws',
     '.wsc',
+    '.a26',
+    '.vb',
+    '.tic',
+    '.p8',
+    '.p8.png',
+    // Nintendo DS
+    '.nds',
+    // Mattel Intellivision
+    '.int',
+    '.itv',
+    '.rom',
   };
 
   void scanDir(Directory dir) {
@@ -607,7 +672,10 @@ List<String> _scanDirectoryIsolate(_ScanParams params) {
         if (entity is Directory) {
           scanDir(entity);
         } else if (entity is File) {
-          final ext = p.extension(entity.path).toLowerCase();
+          final lpath = entity.path.toLowerCase();
+          final ext = lpath.endsWith('.p8.png')
+              ? '.p8.png'
+              : p.extension(entity.path).toLowerCase();
           if (romExtensions.contains(ext) &&
               !params.existingPaths.contains(entity.path)) {
             newFiles.add(entity.path);
@@ -627,6 +695,7 @@ List<String> _scanDirectoryIsolate(_ScanParams params) {
   return newFiles;
 }
 
+/// Show the TV HTTP upload dialog.
 Future<bool?> showTvHttpUploadDialog(BuildContext context) async {
   return showDialog<bool>(
     context: context,

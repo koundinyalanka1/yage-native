@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:file_picker/file_picker.dart';
@@ -18,15 +19,19 @@ import '../services/save_backup_service.dart';
 import '../utils/tv_detector.dart';
 import '../widgets/banner_ad_widget.dart';
 import '../widgets/game_card.dart';
+import '../widgets/import_progress_dialog.dart';
 import '../widgets/tv_http_upload_dialog.dart';
 import '../widgets/tv_focusable.dart';
 import '../widgets/rom_folder_setup_dialog.dart';
+import '../widgets/whats_new_dialog.dart';
 import '../services/settings_service.dart';
+import '../services/whats_new_service.dart';
 import '../utils/theme.dart';
 import 'achievements_screen.dart';
 import 'game_screen.dart';
 import 'settings_screen.dart';
 
+/// Sort options for the game library
 enum GameSortOption {
   nameAsc('Name (A-Z)', Icons.sort_by_alpha),
   nameDesc('Name (Z-A)', Icons.sort_by_alpha),
@@ -41,6 +46,7 @@ enum GameSortOption {
   const GameSortOption(this.label, this.icon);
 }
 
+/// Main home screen with game library
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -63,11 +69,18 @@ class _HomeScreenState extends State<HomeScreen>
   Timer? _searchDebounce;
   Timer? _romSetupFallbackTimer;
   bool _romSetupDialogAttempted = false;
+  bool _whatsNewAttempted = false;
 
+  /// Index of the last focused game card so we can restore focus after
+  /// navigating away (settings, game screen) and coming back.
   int _lastFocusedGameIndex = 0;
 
+  /// Tab index when the last game card was focused. Restore only when
+  /// we're on the same tab (All=0, Recent=1, Favorites=2).
   int _lastFocusedTabIndex = 0;
 
+  /// Whether we should restore focus to [_lastFocusedGameIndex] on the
+  /// next build (set to true after returning from a pushed route).
   bool _shouldRestoreFocus = false;
 
   @override
@@ -81,19 +94,26 @@ class _HomeScreenState extends State<HomeScreen>
       onKeyEvent: (node, event) {
         if (event is! KeyDownEvent) return KeyEventResult.ignored;
         if (!TvDetector.isTV) return KeyEventResult.ignored;
+
+        // Open the virtual keyboard on Select/Enter
         if (event.logicalKey == LogicalKeyboardKey.select ||
             event.logicalKey == LogicalKeyboardKey.gameButtonA ||
             event.logicalKey == LogicalKeyboardKey.enter) {
           SystemChannels.textInput.invokeMethod('TextInput.show');
           return KeyEventResult.handled;
         }
+
+        // Close keyboard on B/Back/Escape
         if (event.logicalKey == LogicalKeyboardKey.gameButtonB ||
             event.logicalKey == LogicalKeyboardKey.escape ||
             event.logicalKey == LogicalKeyboardKey.goBack ||
             event.logicalKey == LogicalKeyboardKey.browserBack) {
           SystemChannels.textInput.invokeMethod('TextInput.hide');
+          // Allow the key to bubble up so we can also navigate away or let the app handle back routing
           return KeyEventResult.ignored;
         }
+
+        // Traverse away from text input since native text-input swallows D-pad Left/Right
         if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
           node.focusInDirection(TraversalDirection.right);
           return KeyEventResult.handled;
@@ -106,13 +126,20 @@ class _HomeScreenState extends State<HomeScreen>
         return KeyEventResult.ignored;
       },
     );
+
+    // Restore persisted view preferences
     final settings = context.read<SettingsService>().settings;
     _isGridView = settings.isGridView;
     _sortOption = GameSortOption.values.firstWhere(
       (o) => o.name == settings.sortOption,
       orElse: () => GameSortOption.nameAsc,
     );
+
+    // Check if the app was opened via a file intent
     WidgetsBinding.instance.addPostFrameCallback((_) => _checkIncomingFile());
+    // Encourage ROM folder setup on first launch.
+    // Use a fast path + fallback so slow debug runs on Android TV still
+    // surface visible UI quickly and don't feel "stuck".
     WidgetsBinding.instance.addPostFrameCallback(
       (_) => _maybeShowRomFolderSetup(),
     );
@@ -120,6 +147,7 @@ class _HomeScreenState extends State<HomeScreen>
       const Duration(seconds: 2),
       _maybeShowRomFolderSetup,
     );
+    // AdMob is initialized in SplashScreen before HomeScreen loads.
   }
 
   Future<void> _maybeShowRomFolderSetup() async {
@@ -127,16 +155,30 @@ class _HomeScreenState extends State<HomeScreen>
     _romSetupDialogAttempted = true;
 
     final settingsService = context.read<SettingsService>();
+    // Ensure provider is created early, but don't block dialog visibility on
+    // library readiness (can be slow in debug/TV environments).
     context.read<GameLibraryService>();
-    try {
-      await settingsService.whenLoaded.timeout(const Duration(seconds: 3));
-    } catch (_) {
+
+    // Settings should usually be ready quickly; keep a hard cap so startup UI
+    // is not delayed indefinitely on slow devices. On Android TV, avoid this
+    // wait entirely: startup ANRs on Sony/MediaTek TVs happen while Android is
+    // still waiting for a focused window, and the upload prompt can use the
+    // default empty folder setting until the async settings load catches up.
+    if (!TvDetector.isTV) {
+      try {
+        await settingsService.whenLoaded.timeout(const Duration(seconds: 3));
+      } catch (_) {
+        // Timeout/error fallback: continue to one-time flag check below.
+      }
     }
     if (!mounted) return;
 
     try {
       final folderUri = settingsService.settings.userRomsFolderUri;
       final hasFolder = await RomFolderService.hasUsableFolder(folderUri);
+
+      // On TV, ROMs are loaded via the built-in HTTP server — no need for a
+      // folder setup dialog when the library already has at least one game.
       if (!mounted) return;
       final library = context.read<GameLibraryService>();
       if (TvDetector.isTV && library.games.isNotEmpty) {
@@ -157,20 +199,66 @@ class _HomeScreenState extends State<HomeScreen>
       }
     } catch (e) {
       debugPrint('HomeScreen: failed to evaluate ROM setup prompt — $e');
+      // Allow fallback timer/retry path to run again.
       _romSetupDialogAttempted = false;
     }
+
+    // After the ROM-folder check resolves, surface the What's New dialog. This
+    // is a no-op unless the installed version has notes the user hasn't seen
+    // AND the library already contains ROMs (the "already set up" case). On an
+    // empty library it does nothing here; a subsequent import will trigger it
+    // instead. Running it here keeps it from stacking on the ROM-setup dialog.
+    if (mounted) {
+      await _maybeShowWhatsNew();
+    }
+  }
+
+  /// Shows the What's New dialog at most once per launch, and only when:
+  ///   • the installed app version has unseen release notes
+  ///     (see [WhatsNewService]), AND
+  ///   • the library actually contains ROMs — either they were already set up
+  ///     before this launch, or the user has just added some.
+  ///
+  /// We never surface release notes on a brand-new, empty install before the
+  /// user has any games. This method is safe to call from multiple places
+  /// (startup + after each ROM import): the per-version bookkeeping in
+  /// [WhatsNewService] and the [_whatsNewAttempted] one-shot guard keep it to a
+  /// single appearance.
+  Future<void> _maybeShowWhatsNew() async {
+    if (!mounted || _whatsNewAttempted) return;
+
+    // Require a non-empty library. Deliberately do NOT consume the one-shot
+    // guard here, so that if the library is still empty at startup a later ROM
+    // import in the same session can re-enter and trigger the dialog.
+    final library = context.read<GameLibraryService>();
+    if (library.games.isEmpty) return;
+
+    _whatsNewAttempted = true;
+
+    final entry = await WhatsNewService.pendingEntry();
+    if (entry == null || !mounted) return;
+
+    await showWhatsNewDialog(context, entry);
+    await WhatsNewService.markCurrentVersionShown();
   }
 
   final FocusNode _keyFocusNode = FocusNode();
 
+  /// Focus node for the tab bar — used to move focus from game list to tabs.
   final FocusNode _tabBarFocusNode = FocusNode();
 
+  /// Focus node for the search bar — used to move focus from game list to header.
   late final FocusNode _searchFocusNode;
 
+  /// Focus scope for the header/action bar — search, filter, sort buttons.
   final FocusScopeNode _headerFocusNode = FocusScopeNode();
 
+  /// Focus scope for the game list area. Uses FocusScope so empty-state
+  /// buttons (Add ROMs, Add Folder) receive D-pad focus instead of the
+  /// scope itself — required for Android TV App Quality Guidelines.
   final FocusScopeNode _gameListFocusNode = FocusScopeNode();
 
+  /// Debounced search update — waits 300ms after the last keystroke.
   void _onSearchChanged(String value) {
     _searchDebounce?.cancel();
     _searchDebounce = Timer(const Duration(milliseconds: 300), () {
@@ -193,32 +281,48 @@ class _HomeScreenState extends State<HomeScreen>
     super.dispose();
   }
 
+  /// Gamepad L1 / R1 bumpers switch tabs, B / Back refocuses game list.
+  /// UP arrow at top of game list moves focus to action bar.
   KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
 
     final key = event.logicalKey;
+
+    // UP arrow - if in top row of game list, move to header/action bar
     if (key == LogicalKeyboardKey.arrowUp) {
       final primary = FocusManager.instance.primaryFocus;
       final inGameList =
           primary != null && primary.nearestScope == _gameListFocusNode;
       if (inGameList) {
-        final screenWidth = MediaQuery.of(context).size.width;
+        // Calculate columns in grid using the same values as the grid delegate.
+        // Subtract the SafeArea/overscan insets the grid sits inside (on TV the
+        // root injects ~24px of overscan padding that SafeArea consumes before
+        // the sliver gets its width) so the column count matches what's drawn.
+        final mq = MediaQuery.of(context);
+        final screenWidth = mq.size.width;
         final isTv = TvDetector.isTV;
         final extent = isTv ? 224.0 : 220.0;
         final spacing = isTv ? 20.0 : 12.0;
         final pad = isTv ? 24.0 : 16.0;
-        final availableWidth = screenWidth - (pad * 2);
-        int columns = ((availableWidth + spacing) / (extent + spacing)).ceil();
+        final availableWidth = screenWidth - mq.padding.horizontal - (pad * 2);
+
+        // Mirror Flutter's SliverGridDelegateWithMaxCrossAxisExtent exactly:
+        //   crossAxisCount = ceil(crossAxisExtent / (maxCrossAxisExtent + spacing))
+        // so the "top row → header" check lines up with the real grid.
+        int columns = (availableWidth / (extent + spacing)).ceil();
         if (columns < 1) columns = 1;
 
         final isInTopRow = _lastFocusedGameIndex < columns;
 
         if (isInTopRow) {
+          // Move focus to search bar in header
           _searchFocusNode.requestFocus();
           return KeyEventResult.handled;
         }
       }
     }
+
+    // DOWN arrow - if in header/action bar, move focus to game list
     if (key == LogicalKeyboardKey.arrowDown) {
       final primary = FocusManager.instance.primaryFocus;
       final inHeader =
@@ -228,6 +332,8 @@ class _HomeScreenState extends State<HomeScreen>
         return KeyEventResult.handled;
       }
     }
+
+    // L1 / PageUp / Channel Up / Rewind → previous tab
     if (key == LogicalKeyboardKey.gameButtonLeft1 ||
         key == LogicalKeyboardKey.pageUp ||
         key == LogicalKeyboardKey.channelUp ||
@@ -242,6 +348,7 @@ class _HomeScreenState extends State<HomeScreen>
       }
       return KeyEventResult.handled;
     }
+    // R1 / PageDown / Channel Down / Fast Forward → next tab
     if (key == LogicalKeyboardKey.gameButtonRight1 ||
         key == LogicalKeyboardKey.pageDown ||
         key == LogicalKeyboardKey.channelDown ||
@@ -256,6 +363,8 @@ class _HomeScreenState extends State<HomeScreen>
       }
       return KeyEventResult.handled;
     }
+    // B / Back / Escape → refocus the game list when in header/tabs,
+    // or show exit confirmation when already in the game list (TV requirement).
     if (key == LogicalKeyboardKey.gameButtonB ||
         key == LogicalKeyboardKey.escape ||
         key == LogicalKeyboardKey.goBack ||
@@ -267,6 +376,7 @@ class _HomeScreenState extends State<HomeScreen>
         _gameListFocusNode.requestFocus();
         return KeyEventResult.handled;
       }
+      // Let the back button exit the app by returning ignored
       return KeyEventResult.ignored;
     }
     return KeyEventResult.ignored;
@@ -274,17 +384,23 @@ class _HomeScreenState extends State<HomeScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Check again when app is resumed (e.g. user opened another file while app was in background)
     if (state == AppLifecycleState.resumed) {
       _checkIncomingFile();
     }
   }
 
+  /// Check if the app was opened via a VIEW intent with a ROM file path.
+  /// If so, add it to the library and launch it immediately.
+  /// Also handles ZIP files by extracting ROMs and importing them.
   Future<void> _checkIncomingFile() async {
     try {
       final path = await _deviceChannel.invokeMethod<String>('getOpenFilePath');
       if (path == null || path.isEmpty || !mounted) return;
 
       final library = context.read<GameLibraryService>();
+
+      // ── Handle ZIP files: extract ROMs and import ──
       if (path.toLowerCase().endsWith('.zip')) {
         List<GameRom> games;
         try {
@@ -306,6 +422,7 @@ class _HomeScreenState extends State<HomeScreen>
         if (!mounted) return;
 
         if (games.isNotEmpty) {
+          // Auto-download cover art for newly imported ROMs
           _autoFetchCovers(games, library);
 
           ScaffoldMessenger.of(context)
@@ -318,8 +435,13 @@ class _HomeScreenState extends State<HomeScreen>
                 duration: const Duration(seconds: 2),
               ),
             );
+
+          // Launch the first game if only one was imported. When more than one
+          // arrived we stay on Home, so surface What's New (once per version).
           if (games.length == 1) {
             _launchGame(games.first);
+          } else {
+            await _maybeShowWhatsNew();
           }
         } else {
           ScaffoldMessenger.of(context)
@@ -332,6 +454,8 @@ class _HomeScreenState extends State<HomeScreen>
         }
         return;
       }
+
+      // ── Handle individual ROM files ──
       final game = GameRom.fromPath(path);
       if (game == null) {
         if (mounted) {
@@ -341,7 +465,11 @@ class _HomeScreenState extends State<HomeScreen>
         }
         return;
       }
+
+      // Add to library if not already there
       await library.addRom(path);
+
+      // Find the game entry (addRom might return null if it already exists)
       final libraryGame = library.games.firstWhere(
         (g) => g.path == path,
         orElse: () => game,
@@ -351,10 +479,12 @@ class _HomeScreenState extends State<HomeScreen>
         _launchGame(libraryGame);
       }
     } catch (e) {
+      // Channel not available (non-Android) — log for diagnostics
       debugPrint('HomeScreen: TV intent launch failed — $e');
     }
   }
 
+  /// Sort a list of games according to the current sort option
   List<GameRom> _sortGames(List<GameRom> games) {
     final sorted = List<GameRom>.from(games);
     switch (_sortOption) {
@@ -368,10 +498,11 @@ class _HomeScreenState extends State<HomeScreen>
         );
       case GameSortOption.lastPlayed:
         sorted.sort((a, b) {
+          // Games never played go to the bottom
           if (a.lastPlayed == null && b.lastPlayed == null) return 0;
           if (a.lastPlayed == null) return 1;
           if (b.lastPlayed == null) return -1;
-          return b.lastPlayed!.compareTo(a.lastPlayed!); 
+          return b.lastPlayed!.compareTo(a.lastPlayed!); // most recent first
         });
       case GameSortOption.mostPlayed:
         sorted.sort(
@@ -392,6 +523,7 @@ class _HomeScreenState extends State<HomeScreen>
     return sorted;
   }
 
+  /// Show a D-pad / TV-friendly sort dialog instead of PopupMenuButton.
   void _showSortDialog() {
     final colors = AppColorTheme.of(context);
     showDialog(
@@ -496,13 +628,17 @@ class _HomeScreenState extends State<HomeScreen>
         );
       },
     ).then((_) {
+      // Restore focus to the game list on TV after dialog dismissal
       if (mounted) _gameListFocusNode.requestFocus();
     });
   }
 
+  /// D-pad friendly platform filter dialog for TV (replaces DropdownButton).
   void _showPlatformFilterDialog() {
     final colors = AppColorTheme.of(context);
-    final platforms = systemFilterOptions;
+    final platforms = TvDetector.isTV
+        ? tvSystemFilterOptions
+        : systemFilterOptions;
     showDialog(
       context: context,
       useRootNavigator: false,
@@ -596,6 +732,7 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _addRomFile() async {
+    // On TV, use HTTP upload instead of file picker
     if (TvDetector.isTV) {
       await _showTvHttpUpload();
       return;
@@ -603,6 +740,8 @@ class _HomeScreenState extends State<HomeScreen>
 
     List<String>? paths;
     final zipPaths = <String>{};
+
+    // Phone/tablet: use system file picker (SAF)
     const allowedExtensions = {
       '.gba',
       '.gb',
@@ -623,7 +762,6 @@ class _HomeScreenState extends State<HomeScreen>
       '.pce',
       '.sgx',
       '.cue',
-      '.chd',
       '.z64',
       '.n64',
       '.v64',
@@ -632,19 +770,29 @@ class _HomeScreenState extends State<HomeScreen>
       '.ngc',
       '.ws',
       '.wsc',
+      '.a26',
+      '.vb',
+      '.tic',
+      '.p8',
+      '.p8.png',
+      // Nintendo DS
+      '.nds',
+      // Mattel Intellivision
+      '.int',
+      '.itv',
+      '.rom',
     };
     try {
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.any,
-        allowMultiple: true,
-      );
+      final result = await FilePicker.pickFiles(type: FileType.any);
       if (result != null) {
         for (final f in result.files) {
           if (f.path == null) continue;
           final name = f.name.toLowerCase();
           final dot = name.lastIndexOf('.');
           if (dot == -1) continue;
-          final ext = name.substring(dot);
+          final ext = name.endsWith('.p8.png')
+              ? '.p8.png'
+              : name.substring(dot);
           if (!allowedExtensions.contains(ext)) continue;
           paths ??= [];
           paths.add(f.path!);
@@ -658,71 +806,34 @@ class _HomeScreenState extends State<HomeScreen>
     if (!mounted) return;
     if (paths != null && paths.isNotEmpty && mounted) {
       final library = context.read<GameLibraryService>();
-      final addedGames = <GameRom>[];
-      ScaffoldMessenger.of(context)
-        ..clearSnackBars()
-        ..showSnackBar(
-          SnackBar(
-            content: Text(
-              'Importing ${paths.length} file${paths.length == 1 ? '' : 's'}…',
-            ),
-            duration: const Duration(
-              days: 1,
-            ), 
-            action: SnackBarAction(label: 'Dismiss', onPressed: () {}),
-          ),
-        );
 
-      try {
-        for (final path in paths) {
-          if (!mounted) break;
-          await Future.delayed(const Duration(milliseconds: 16));
-          if (zipPaths.contains(path)) {
-            final games = await library.importRomZip(path);
-            addedGames.addAll(games);
-          } else {
-            final game = await library.importRom(path);
-            if (game != null) addedGames.add(game);
-          }
-        }
-      } on ArchiveException catch (_) {
-        if (mounted) {
-          ScaffoldMessenger.of(context)
-            ..clearSnackBars()
-            ..showSnackBar(
-              const SnackBar(
-                content: Text(
-                  'Failed to extract archive — file may be corrupted',
-                ),
-              ),
-            );
-        }
-        if (TvDetector.isTV && mounted) {
-          setState(() => _shouldRestoreFocus = true);
-        }
-        return;
-      } catch (e) {
-        debugPrint('ROM import error: $e');
-        if (mounted) {
-          ScaffoldMessenger.of(context)
-            ..clearSnackBars()
-            ..showSnackBar(
-              const SnackBar(content: Text('Failed to import ROM files')),
-            );
-        }
-        return;
-      }
-      if (mounted) {
-        ScaffoldMessenger.of(context).clearSnackBars();
-      }
+      // Show a modal progress dialog with the current ROM name + percentage
+      // while each file is copied / each archive (e.g. PS1 cue/bin ZIP) is
+      // extracted and imported.
+      final addedGames = await runFileImportWithProgress(
+        context,
+        paths: paths,
+        zipPaths: zipPaths,
+        library: library,
+      );
+
+      if (!mounted) return;
 
       if (addedGames.isNotEmpty && mounted) {
         _tabController.animateTo(0);
+
+        // Auto-download cover art for newly imported ROMs (fire-and-forget).
         _autoFetchCovers(addedGames, library);
+
+        // Restore focus for TV navigation
         if (TvDetector.isTV) {
           setState(() => _shouldRestoreFocus = true);
         }
+
+        // The library now has ROMs — surface What's New (once per version).
+        await _maybeShowWhatsNew();
       } else if (mounted) {
+        // Let the user know when nothing was imported (e.g. ZIP with no ROMs)
         final hasZip = paths.any((p) => p.toLowerCase().endsWith('.zip'));
         ScaffoldMessenger.of(context)
           ..clearSnackBars()
@@ -730,11 +841,13 @@ class _HomeScreenState extends State<HomeScreen>
             SnackBar(
               content: Text(
                 hasZip
-                    ? 'No valid ROM files found inside the ZIP.'
+                    ? 'No valid ROM files found inside the ZIP. PS1 ZIPs need a .cue file with its .bin tracks.'
                     : 'No valid ROM files were imported.',
               ),
             ),
           );
+
+        // Restore focus for TV navigation even when no ROMs imported
         if (TvDetector.isTV) {
           setState(() => _shouldRestoreFocus = true);
         }
@@ -743,6 +856,7 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _addRomFolder() async {
+    // On TV, use HTTP upload instead of folder picker
     if (TvDetector.isTV) {
       await _showTvHttpUpload();
       return;
@@ -750,6 +864,8 @@ class _HomeScreenState extends State<HomeScreen>
 
     final library = context.read<GameLibraryService>();
     List<String>? importedPaths;
+
+    // Phone/tablet: use native SAF folder picker
     try {
       final result = await _deviceChannel.invokeMethod<List<dynamic>>(
         'importRomsFromFolder',
@@ -763,6 +879,11 @@ class _HomeScreenState extends State<HomeScreen>
 
     if (importedPaths != null && importedPaths.isNotEmpty && mounted) {
       final messenger = ScaffoldMessenger.of(context);
+
+      // Must use the same navigator as [Navigator.pop] below — nested
+      // MaterialApp in SplashScreen makes default showDialog use the outer
+      // navigator while [Navigator.of(context)] from Home is the inner one,
+      // so a mismatched pop can remove [HomeScreen] and leave a black screen.
       showDialog<void>(
         context: context,
         barrierDismissible: false,
@@ -812,6 +933,9 @@ class _HomeScreenState extends State<HomeScreen>
               duration: const Duration(seconds: 2),
             ),
           );
+
+        // The library now has ROMs — surface What's New (once per version).
+        await _maybeShowWhatsNew();
       } else if (mounted) {
         messenger
           ..clearSnackBars()
@@ -823,6 +947,7 @@ class _HomeScreenState extends State<HomeScreen>
           );
       }
     } else if (importedPaths != null && importedPaths.isEmpty && mounted) {
+      // User selected folder via SAF but it was empty
       ScaffoldMessenger.of(context)
         ..clearSnackBars()
         ..showSnackBar(
@@ -832,8 +957,10 @@ class _HomeScreenState extends State<HomeScreen>
           ),
         );
     }
+    // When importedPaths == null: user cancelled SAF picker — no message
   }
 
+  /// Navigate to settings and restore game list focus on return.
   void _openSettings() {
     Navigator.of(
       context,
@@ -845,12 +972,31 @@ class _HomeScreenState extends State<HomeScreen>
   void _launchGame(GameRom game) async {
     final emulator = context.read<EmulatorService>();
     final library = context.read<GameLibraryService>();
-    final settings = context.read<SettingsService>().settings;
+    final settingsService = context.read<SettingsService>();
     final raService = context.read<RetroAchievementsService>();
+    try {
+      await settingsService.whenLoaded;
+    } catch (_) {}
+    if (!mounted) return;
+    final settings = settingsService.settings;
+
+    // Update last played
     await library.updateLastPlayed(game);
+
+    // Start RA achievement session in parallel with ROM loading.
+    // This kicks off hash computation + game ID lookup + achievement data
+    // fetch so they're already in progress (or cached) by the time the
+    // game screen's _detectRetroAchievements() runs.
     if (settings.raEnabled && raService.isLoggedIn) {
+      // Fire-and-forget — don't block ROM loading
       raService.startGameSession(game);
     }
+
+    // loadRom() needs the folder setting before melonDS opens the cartridge,
+    // because melonDS reads .sav files inside retro_load_game().
+    emulator.updateSettings(settings);
+
+    // Load ROM
     final success = await emulator.loadRom(game);
 
     if (success && mounted) {
@@ -887,6 +1033,7 @@ class _HomeScreenState extends State<HomeScreen>
             policy: OrderedTraversalPolicy(),
             child: Column(
               children: [
+                // In landscape, combine header elements into a single row
                 if (isLandscape)
                   FocusTraversalOrder(
                     order: const NumericFocusOrder(0),
@@ -930,23 +1077,29 @@ class _HomeScreenState extends State<HomeScreen>
                     ),
                   ),
                 ),
+                // TV bumper hint bar
                 if (TvDetector.isTV) _buildTvHintBar(),
+                // Banner ad at bottom (mobile only, not during gameplay)
                 const BannerAdWidget(),
               ],
             ),
           ),
         ),
+        // On TV don't show FAB (focus gets stuck on it) — TV has
+        // Add ROM buttons in the header and empty-state instead.
         floatingActionButton: TvDetector.isTV ? null : _buildFAB(),
       ),
     );
   }
 
+  /// Compact header for landscape mode - combines logo, search, filter in one row
   Widget _buildCompactHeader() {
     final colors = AppColorTheme.of(context);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Row(
         children: [
+          // Logo
           ClipRRect(
             borderRadius: BorderRadius.circular(8),
             child: Image.asset(
@@ -956,6 +1109,8 @@ class _HomeScreenState extends State<HomeScreen>
             ),
           ),
           const SizedBox(width: 12),
+
+          // Search bar - expanded
           Expanded(
             child: SizedBox(
               height: 40,
@@ -1001,6 +1156,8 @@ class _HomeScreenState extends State<HomeScreen>
             ),
           ),
           const SizedBox(width: 8),
+
+          // Platform filter — dialog on TV (D-pad safe), dropdown on phone
           if (TvDetector.isTV)
             TvFocusable(
               onTap: _showPlatformFilterDialog,
@@ -1070,17 +1227,20 @@ class _HomeScreenState extends State<HomeScreen>
                             color: colors.textPrimary,
                           ),
                           dropdownColor: colors.surface,
-                          items: systemFilterOptions
-                              .map(
-                                (option) => DropdownMenuItem<SystemFilter>(
-                                  value: option.value,
-                                  child: Text(
-                                    option.label,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                              )
-                              .toList(),
+                          items:
+                              (TvDetector.isTV
+                                      ? tvSystemFilterOptions
+                                      : systemFilterOptions)
+                                  .map(
+                                    (option) => DropdownMenuItem<SystemFilter>(
+                                      value: option.value,
+                                      child: Text(
+                                        option.label,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  )
+                                  .toList(),
                           onChanged: (value) => value == null
                               ? null
                               : setState(() => _selectedSystem = value),
@@ -1092,6 +1252,8 @@ class _HomeScreenState extends State<HomeScreen>
               ),
             ),
           const SizedBox(width: 8),
+
+          // Sort button — uses dialog instead of PopupMenuButton for TV D-pad support
           TvFocusable(
             onTap: _showSortDialog,
             borderRadius: BorderRadius.circular(8),
@@ -1107,6 +1269,8 @@ class _HomeScreenState extends State<HomeScreen>
               constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
             ),
           ),
+
+          // View toggle
           TvFocusable(
             onTap: () {
               setState(() => _isGridView = !_isGridView);
@@ -1127,6 +1291,8 @@ class _HomeScreenState extends State<HomeScreen>
               constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
             ),
           ),
+
+          // On TV: direct focusable buttons (popup menus are hard with D-pad)
           if (TvDetector.isTV) ...[
             TvFocusable(
               borderRadius: BorderRadius.circular(8),
@@ -1170,6 +1336,7 @@ class _HomeScreenState extends State<HomeScreen>
               ),
             ),
           ] else ...[
+            // More menu (phone/tablet compact) — Settings + Download All Cover Art
             PopupMenuButton<String>(
               icon: Icon(
                 Icons.more_vert,
@@ -1221,6 +1388,7 @@ class _HomeScreenState extends State<HomeScreen>
       padding: const EdgeInsets.fromLTRB(20, 16, 12, 8),
       child: Row(
         children: [
+          // Logo/Title
           Expanded(
             child: Row(
               children: [
@@ -1280,6 +1448,8 @@ class _HomeScreenState extends State<HomeScreen>
               ],
             ),
           ),
+
+          // Sort button — uses dialog instead of PopupMenuButton for TV D-pad support
           TvFocusable(
             onTap: _showSortDialog,
             borderRadius: BorderRadius.circular(8),
@@ -1289,6 +1459,8 @@ class _HomeScreenState extends State<HomeScreen>
               onPressed: _showSortDialog,
             ),
           ),
+
+          // View toggle
           TvFocusable(
             onTap: () {
               setState(() => _isGridView = !_isGridView);
@@ -1306,6 +1478,8 @@ class _HomeScreenState extends State<HomeScreen>
               },
             ),
           ),
+
+          // On TV: direct focusable buttons (popup menus are hard with D-pad)
           if (TvDetector.isTV) ...[
             TvFocusable(
               borderRadius: BorderRadius.circular(8),
@@ -1338,6 +1512,7 @@ class _HomeScreenState extends State<HomeScreen>
               ),
             ),
           ] else ...[
+            // More menu (phone/tablet) — Settings + Download All Cover Art
             PopupMenuButton<String>(
               icon: Icon(Icons.more_vert, color: colors.textSecondary),
               tooltip: 'More options',
@@ -1379,6 +1554,8 @@ class _HomeScreenState extends State<HomeScreen>
 
   Widget _buildSearchBar() {
     final colors = AppColorTheme.of(context);
+
+    // Provide a focus node to text fields on TV to ensure D-pad input works smoothly
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: TextField(
@@ -1467,14 +1644,15 @@ class _HomeScreenState extends State<HomeScreen>
             icon: Icon(Icons.arrow_drop_down, color: colors.textMuted),
             style: TextStyle(fontSize: 13, color: colors.textPrimary),
             dropdownColor: colors.surface,
-            items: systemFilterOptions
-                .map(
-                  (option) => DropdownMenuItem<SystemFilter>(
-                    value: option.value,
-                    child: Text(option.label),
-                  ),
-                )
-                .toList(),
+            items:
+                (TvDetector.isTV ? tvSystemFilterOptions : systemFilterOptions)
+                    .map(
+                      (option) => DropdownMenuItem<SystemFilter>(
+                        value: option.value,
+                        child: Text(option.label),
+                      ),
+                    )
+                    .toList(),
             onChanged: (value) =>
                 value == null ? null : setState(() => _selectedSystem = value),
           ),
@@ -1484,6 +1662,12 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   List<GameRom> _applySystemFilter(List<GameRom> games) {
+    // On TV, hide platforms that are still work-in-progress.
+    if (TvDetector.isTV) {
+      games = games
+          .where((g) => !tvRestrictedGamePlatforms.contains(g.platform))
+          .toList();
+    }
     if (_selectedSystem == SystemFilter.all) return games;
     return games.where((g) => _selectedSystem.matchesGame(g)).toList();
   }
@@ -1493,7 +1677,7 @@ class _HomeScreenState extends State<HomeScreen>
     return Focus(
       focusNode: _tabBarFocusNode,
       skipTraversal: !TvDetector
-          .isTV, 
+          .isTV, // On TV: allow D-pad to reach tabs (basic remotes have no bumpers)
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 16),
         decoration: BoxDecoration(
@@ -1519,6 +1703,7 @@ class _HomeScreenState extends State<HomeScreen>
                 fontSize: 12,
                 fontWeight: FontWeight.bold,
               ),
+              // Visible focus ring for TV / D-pad navigation
               overlayColor: WidgetStateProperty.resolveWith((states) {
                 if (states.contains(WidgetState.focused)) {
                   return colors.accent.withAlpha(50);
@@ -1640,6 +1825,8 @@ class _HomeScreenState extends State<HomeScreen>
           prev.games.length != next.games.length ||
           !_gameListsEqual(prev.games, next.games),
       builder: (context, data, _) {
+        // Only show full-screen spinner on initial load (empty library).
+        // During refresh, keep games visible with a subtle overlay.
         if (data.isLoading && data.games.isEmpty) {
           return const Center(child: CircularProgressIndicator());
         }
@@ -1767,6 +1954,9 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
+  /// Shallow equality check for game lists — compares paths which are
+  /// the unique identity of a GameRom. Avoids unnecessary rebuilds when
+  /// the library notifies but the actual list hasn't changed.
   static bool _gameListsEqual(List<GameRom> a, List<GameRom> b) {
     if (identical(a, b)) return true;
     if (a.length != b.length) return false;
@@ -1784,8 +1974,14 @@ class _HomeScreenState extends State<HomeScreen>
     return true;
   }
 
+  /// Determines which game card index should receive autofocus.
+  /// On TV: uses the last-focused index when restoring focus (only if
+  /// we're on the same tab), otherwise defaults to 0 on the initial build.
   bool _shouldAutofocusIndex(BuildContext context, int index, int itemCount) {
     if (!TvDetector.isTV) return false;
+
+    // Safety check: is another route on top? e.g. the TV upload dialog overlaying the home screen.
+    // If the home screen's route is no longer current, it should not blindly autofocus.
     final route = ModalRoute.of(context);
     if (route != null && !route.isCurrent) return false;
 
@@ -1798,6 +1994,8 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Widget _buildGameList(List<GameRom> games) {
+    // Clear the restore flag after this build frame so we don't keep
+    // autofocusing on subsequent rebuilds (e.g. from Consumer).
     if (_shouldRestoreFocus) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _shouldRestoreFocus = false;
@@ -1805,13 +2003,14 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     if (_isGridView) {
+      // Responsive columns; larger cache extent for 100+ games (smoother scrolling)
       final cacheExtent = games.length > 100 ? 600.0 : 400.0;
 
       final tvGrid = TvDetector.isTV;
       return TvScrollAccelerator(
         child: GridView.builder(
           padding: EdgeInsets.all(tvGrid ? 24 : 16),
-          cacheExtent: cacheExtent,
+          scrollCacheExtent: ScrollCacheExtent.pixels(cacheExtent),
           gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
             maxCrossAxisExtent: tvGrid ? 224 : 220,
             childAspectRatio: 0.65,
@@ -1847,7 +2046,7 @@ class _HomeScreenState extends State<HomeScreen>
     return TvScrollAccelerator(
       child: ListView.separated(
         padding: const EdgeInsets.all(16),
-        cacheExtent: listCacheExtent,
+        scrollCacheExtent: ScrollCacheExtent.pixels(listCacheExtent),
         itemCount: games.length,
         separatorBuilder: (context, index) => const SizedBox(height: 4),
         itemBuilder: (context, index) {
@@ -1966,6 +2165,7 @@ class _HomeScreenState extends State<HomeScreen>
 
   Widget _buildFAB() {
     return Padding(
+      // Push the FAB up so it stays above the BannerAd (approx 50-60dp)
       padding: const EdgeInsets.only(bottom: 60),
       child: TvFocusable(
         borderRadius: BorderRadius.circular(16),
@@ -1981,15 +2181,14 @@ class _HomeScreenState extends State<HomeScreen>
   Future<void> _selectCoverArt(GameRom game) async {
     final library = context.read<GameLibraryService>();
 
-    final result = await FilePicker.platform.pickFiles(
+    final result = await FilePicker.pickFile(
       type: FileType.custom,
       allowedExtensions: const ['jpg', 'jpeg', 'png', 'webp', 'gif'],
-      allowMultiple: false,
     );
     if (!mounted) return;
 
-    if (result != null && result.files.isNotEmpty) {
-      final path = result.files.first.path;
+    if (result != null) {
+      final path = result.path;
       if (path != null) {
         await library.setCoverArt(game, path);
         if (mounted) {
@@ -2006,6 +2205,7 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
+  /// Download cover art for a single game by its ROM hash.
   Future<void> _downloadCoverArt(GameRom game) async {
     if (!mounted) return;
 
@@ -2058,6 +2258,7 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
+  /// Download cover art for all games that don't have one.
   Future<void> _downloadAllCoverArt() async {
     if (!mounted) return;
 
@@ -2116,6 +2317,7 @@ class _HomeScreenState extends State<HomeScreen>
       );
   }
 
+  /// Show the TV HTTP upload dialog for adding ROMs via web browser.
   Future<void> _showTvHttpUpload() async {
     final result = await showDialog<bool>(
       context: context,
@@ -2127,11 +2329,16 @@ class _HomeScreenState extends State<HomeScreen>
     if (!mounted) return;
 
     if (result == true) {
+      // Library was refreshed in the dialog
       _tabController.animateTo(0);
     }
+
+    // Restore focus for TV navigation
     setState(() => _shouldRestoreFocus = true);
   }
 
+  /// Fire-and-forget: download cover art for a list of newly imported games.
+  /// Concurrency reduced on low-RAM to avoid competing with import and UI.
   void _autoFetchCovers(List<GameRom> games, GameLibraryService library) {
     final coverService = context.read<CoverArtService>();
     final toFetch = games.where((g) => g.coverPath == null).toList();
@@ -2157,11 +2364,17 @@ class _HomeScreenState extends State<HomeScreen>
     }();
   }
 
+  /// Show achievements list for a game.
+  ///
+  /// This resolves the game ID from the ROM hash, loads achievement data,
+  /// and opens the AchievementsScreen.
   Future<void> _showAchievementsForGame(GameRom game) async {
     final raService = context.read<RetroAchievementsService>();
     final settings = context.read<SettingsService>().settings;
 
     if (!raService.isLoggedIn) return;
+
+    // Show loading indicator
     ScaffoldMessenger.of(context)
       ..clearSnackBars()
       ..showSnackBar(
@@ -2183,6 +2396,10 @@ class _HomeScreenState extends State<HomeScreen>
           duration: Duration(seconds: 10),
         ),
       );
+
+    // Start game session to resolve game ID and load data.
+    // awaitData: true ensures achievement metadata is fully loaded before
+    // we check gameData — avoids the screen opening with no data.
     await raService.startGameSession(game, awaitData: true);
 
     if (!mounted) return;
@@ -2234,6 +2451,9 @@ class _HomeScreenState extends State<HomeScreen>
   void _showGameOptions(GameRom game) {
     final colors = AppColorTheme.of(context);
     final library = context.read<GameLibraryService>();
+
+    // Resolve RA state before building the menu so we don't need a Builder
+    // that returns SizedBox.shrink() — that causes a phantom focus gap on TV.
     final raService = context.read<RetroAchievementsService>();
     final settings = context.read<SettingsService>();
     final showAchievements =
@@ -2420,6 +2640,8 @@ class _HomeScreenState extends State<HomeScreen>
         ),
       );
     }
+
+    // On TV: use a centered dialog (bottom sheets are awkward on 55" screens)
     if (TvDetector.isTV) {
       showDialog(
         context: context,
@@ -2450,6 +2672,8 @@ class _HomeScreenState extends State<HomeScreen>
       });
       return;
     }
+
+    // Phone/tablet: use bottom sheet
     showModalBottomSheet(
       context: context,
       backgroundColor: colors.surface,
@@ -2523,6 +2747,9 @@ class _HomeScreenState extends State<HomeScreen>
           );
         return;
       }
+
+      // Let the user choose: share or save.
+      // On TV use a centered dialog; on phone use bottom sheet.
       final pickerFuture = TvDetector.isTV
           ? showDialog<void>(
               context: context,
@@ -2753,7 +2980,10 @@ class _HomeScreenState extends State<HomeScreen>
             );
 
       pickerFuture.whenComplete(() {
+        // Delete the temp ZIP after the bottom sheet is dismissed,
+        // regardless of whether the user shared, saved, or cancelled.
         SaveBackupService.deleteTempZip(zipPath);
+        // Restore focus to the game list on TV
         if (mounted) _gameListFocusNode.requestFocus();
       });
     } catch (e) {
@@ -2880,6 +3110,7 @@ class _HomeScreenState extends State<HomeScreen>
           );
       }
     }
+    // Restore focus to the game list on TV after dialog dismissal
     if (mounted) _gameListFocusNode.requestFocus();
   }
 }

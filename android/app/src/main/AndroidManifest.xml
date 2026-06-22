@@ -15,6 +15,23 @@
     <!-- Vibration for haptic feedback -->
     <uses-permission android:name="android.permission.VIBRATE"/>
 
+    <!-- ═══ Bluetooth (game controllers / link-cable peers) ═══ -->
+    <!-- Android ≤ 11: legacy permissions (install-time). -->
+    <uses-permission android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30"/>
+    <!-- Android 12+: runtime permissions. SCAN is flagged neverForLocation
+         so no location permission is required for controller discovery. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"/>
+
+    <!-- Bluetooth hardware is optional — keep TV/emulator installs working -->
+    <uses-feature
+        android:name="android.hardware.bluetooth"
+        android:required="false"/>
+
     <!-- ═══ Android TV support ═══ -->
     <!-- Touchscreen is NOT required — allows install on TV devices -->
     <uses-feature
@@ -41,8 +58,9 @@
         android:isGame="true"
         android:allowBackup="true"
         android:fullBackupContent="@xml/backup_rules"
-        android:dataExtractionRules="@xml/data_extraction_rules">
-        
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:enableOnBackInvokedCallback="false">
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -74,37 +92,79 @@
                 <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="file"/>
                 <data android:scheme="content"/>
+                <!-- lowercase -->
                 <data android:pathPattern=".*\\.gba"/>
                 <data android:pathPattern=".*\\.gb"/>
                 <data android:pathPattern=".*\\.gbc"/>
+                <data android:pathPattern=".*\\.sgb"/>
                 <data android:pathPattern=".*\\.nes"/>
+                <data android:pathPattern=".*\\.unf"/>
+                <data android:pathPattern=".*\\.unif"/>
                 <data android:pathPattern=".*\\.sfc"/>
                 <data android:pathPattern=".*\\.smc"/>
                 <data android:pathPattern=".*\\.sms"/>
                 <data android:pathPattern=".*\\.gg"/>
+                <data android:pathPattern=".*\\.sg"/>
                 <data android:pathPattern=".*\\.md"/>
                 <data android:pathPattern=".*\\.gen"/>
+                <data android:pathPattern=".*\\.smd"/>
                 <data android:pathPattern=".*\\.bin"/>
                 <data android:pathPattern=".*\\.pce"/>
                 <data android:pathPattern=".*\\.sgx"/>
                 <data android:pathPattern=".*\\.cue"/>
-                <data android:pathPattern=".*\\.chd"/>
+                <data android:pathPattern=".*\\.z64"/>
+                <data android:pathPattern=".*\\.n64"/>
+                <data android:pathPattern=".*\\.v64"/>
+                <data android:pathPattern=".*\\.ngp"/>
+                <data android:pathPattern=".*\\.ngc"/>
+                <data android:pathPattern=".*\\.ws"/>
+                <data android:pathPattern=".*\\.wsc"/>
+                <data android:pathPattern=".*\\.a26"/>
+                <data android:pathPattern=".*\\.vb"/>
+                <data android:pathPattern=".*\\.tic"/>
+                <data android:pathPattern=".*\\.p8"/>
+                <data android:pathPattern=".*\\.p8\\.png"/>
+                <data android:pathPattern=".*\\.nds"/>
+                <data android:pathPattern=".*\\.int"/>
+                <data android:pathPattern=".*\\.itv"/>
+                <data android:pathPattern=".*\\.rom"/>
                 <data android:pathPattern=".*\\.zip"/>
+                <!-- uppercase -->
                 <data android:pathPattern=".*\\.GBA"/>
                 <data android:pathPattern=".*\\.GB"/>
                 <data android:pathPattern=".*\\.GBC"/>
+                <data android:pathPattern=".*\\.SGB"/>
                 <data android:pathPattern=".*\\.NES"/>
+                <data android:pathPattern=".*\\.UNF"/>
+                <data android:pathPattern=".*\\.UNIF"/>
                 <data android:pathPattern=".*\\.SFC"/>
                 <data android:pathPattern=".*\\.SMC"/>
                 <data android:pathPattern=".*\\.SMS"/>
                 <data android:pathPattern=".*\\.GG"/>
+                <data android:pathPattern=".*\\.SG"/>
                 <data android:pathPattern=".*\\.MD"/>
                 <data android:pathPattern=".*\\.GEN"/>
+                <data android:pathPattern=".*\\.SMD"/>
                 <data android:pathPattern=".*\\.BIN"/>
                 <data android:pathPattern=".*\\.PCE"/>
                 <data android:pathPattern=".*\\.SGX"/>
                 <data android:pathPattern=".*\\.CUE"/>
-                <data android:pathPattern=".*\\.CHD"/>
+                <data android:pathPattern=".*\\.Z64"/>
+                <data android:pathPattern=".*\\.N64"/>
+                <data android:pathPattern=".*\\.V64"/>
+                <data android:pathPattern=".*\\.NGP"/>
+                <data android:pathPattern=".*\\.NGC"/>
+                <data android:pathPattern=".*\\.WS"/>
+                <data android:pathPattern=".*\\.WSC"/>
+                <data android:pathPattern=".*\\.A26"/>
+                <data android:pathPattern=".*\\.VB"/>
+                <data android:pathPattern=".*\\.TIC"/>
+                <data android:pathPattern=".*\\.P8"/>
+                <data android:pathPattern=".*\\.P8\\.PNG"/>
+                <data android:pathPattern=".*\\.NDS"/>
+                <data android:pathPattern=".*\\.INT"/>
+                <data android:pathPattern=".*\\.ITV"/>
+                <data android:pathPattern=".*\\.ROM"/>
                 <data android:pathPattern=".*\\.ZIP"/>
             </intent-filter>
             <!-- Fallback for file managers that use host/path matching -->
@@ -116,18 +176,38 @@
                 <data android:pathPattern=".*\\.gba"/>
                 <data android:pathPattern=".*\\.gb"/>
                 <data android:pathPattern=".*\\.gbc"/>
+                <data android:pathPattern=".*\\.sgb"/>
                 <data android:pathPattern=".*\\.nes"/>
+                <data android:pathPattern=".*\\.unf"/>
+                <data android:pathPattern=".*\\.unif"/>
                 <data android:pathPattern=".*\\.sfc"/>
                 <data android:pathPattern=".*\\.smc"/>
                 <data android:pathPattern=".*\\.sms"/>
                 <data android:pathPattern=".*\\.gg"/>
+                <data android:pathPattern=".*\\.sg"/>
                 <data android:pathPattern=".*\\.md"/>
                 <data android:pathPattern=".*\\.gen"/>
+                <data android:pathPattern=".*\\.smd"/>
                 <data android:pathPattern=".*\\.bin"/>
                 <data android:pathPattern=".*\\.pce"/>
                 <data android:pathPattern=".*\\.sgx"/>
                 <data android:pathPattern=".*\\.cue"/>
-                <data android:pathPattern=".*\\.chd"/>
+                <data android:pathPattern=".*\\.z64"/>
+                <data android:pathPattern=".*\\.n64"/>
+                <data android:pathPattern=".*\\.v64"/>
+                <data android:pathPattern=".*\\.ngp"/>
+                <data android:pathPattern=".*\\.ngc"/>
+                <data android:pathPattern=".*\\.ws"/>
+                <data android:pathPattern=".*\\.wsc"/>
+                <data android:pathPattern=".*\\.a26"/>
+                <data android:pathPattern=".*\\.vb"/>
+                <data android:pathPattern=".*\\.tic"/>
+                <data android:pathPattern=".*\\.p8"/>
+                <data android:pathPattern=".*\\.p8\\.png"/>
+                <data android:pathPattern=".*\\.nds"/>
+                <data android:pathPattern=".*\\.int"/>
+                <data android:pathPattern=".*\\.itv"/>
+                <data android:pathPattern=".*\\.rom"/>
                 <data android:pathPattern=".*\\.zip"/>
             </intent-filter>
         </activity>
@@ -146,6 +226,15 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+
+        <!-- NOTE: Impeller is NOT disabled app-wide here. Doing so forced the
+             legacy Skia/GLES renderer on phones too, which made the emulator's
+             external game Texture sample softer + janky ("blurry video" on
+             phones like the moto g 60). Impeller is now opted out ONLY on
+             TV / 32-bit devices (where its Vulkan backend crashes on the Mali
+             GPUs of boxes like the Sony BRAVIA) — see
+             MainActivity.getFlutterShellArgs(). Phones keep Impeller. -->
+
             
 
 

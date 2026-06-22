@@ -7,27 +7,31 @@ import '../models/gamepad_layout.dart';
 import '../models/gamepad_skin.dart';
 import '../utils/theme.dart';
 
+/// Virtual gamepad for touch input
 class VirtualGamepad extends StatefulWidget {
-  final Rect gameRect;
-
   final void Function(int keys) onKeysChanged;
   final void Function(double x, double y)? onAnalogChanged;
+  final void Function(double x, double y)? onRightAnalogChanged;
   final double opacity;
   final double scale;
   final bool enableVibration;
   final GamepadLayout layout;
   final bool editMode;
   final void Function(GamepadLayout)? onLayoutChanged;
-  final bool useJoystick; 
+  final bool useJoystick; // true = joystick, false = d-pad
   final GamepadSkinType skin;
 
+  /// Current platform — controls which buttons are shown.
+  ///   • Two-button consoles: A, B, Start, Select, D-pad
+  ///   • SNES/NDS/PS1/MD: extra face buttons where the console has them
+  ///   • GBA/N64/VB: shoulder buttons in addition to A/B
   final GamePlatform platform;
 
   const VirtualGamepad({
     super.key,
-    required this.gameRect,
     required this.onKeysChanged,
     this.onAnalogChanged,
+    this.onRightAnalogChanged,
     this.opacity = 0.7,
     this.scale = 1.0,
     this.enableVibration = true,
@@ -43,18 +47,121 @@ class VirtualGamepad extends StatefulWidget {
   State<VirtualGamepad> createState() => _VirtualGamepadState();
 }
 
+/// The on-screen label and the GBAKey bit a given face/shoulder slot should
+/// emit for the current platform.
+///
+/// Every button bit travels through the native input callback as a 1:1
+/// RetroPad button (A->JOYPAD_A, B->JOYPAD_B, etc.), but each libretro core
+/// then remaps the RetroPad to its own console differently. Genesis Plus GX
+/// and mupen64plus in particular scramble the face buttons, so a slot's
+/// correct key is platform-specific. This keeps the printed label and the bit
+/// it sends in agreement.
+///
+/// Mappings verified against upstream core sources / libretro docs:
+/// - Genesis Plus GX: JOYPAD_Y->A, B->B, A->C, L->X, X->Y, R->Z,
+///   SELECT->Mode.
+/// - mupen64plus-next: JOYPAD_B->N64 A, Y->N64 B, L2->Z, L->L, R->R.
+({String label, int key}) virtualGamepadSlotBinding(
+  GamePlatform platform,
+  GamepadButton slot,
+) {
+  switch (platform) {
+    // Sega Genesis / Mega Drive. Three-button games use A/B/C; six-button
+    // games add X/Y/Z. Mode sits on the Select slot.
+    case GamePlatform.md:
+      switch (slot) {
+        case GamepadButton.aButton:
+          return (label: 'A', key: GBAKey.y);
+        case GamepadButton.bButton:
+          return (label: 'B', key: GBAKey.b);
+        case GamepadButton.xButton:
+          return (label: 'C', key: GBAKey.a);
+        case GamepadButton.yButton:
+          return (label: 'Z', key: GBAKey.r);
+        case GamepadButton.lButton:
+          return (label: 'X', key: GBAKey.l);
+        case GamepadButton.rButton:
+          return (label: 'Y', key: GBAKey.x);
+        case GamepadButton.selectButton:
+          return (label: 'MODE', key: GBAKey.select);
+        case GamepadButton.startButton:
+          return (label: 'START', key: GBAKey.start);
+        // Mega Drive has no L2/R2; the slots are unused.
+        case GamepadButton.l2Button:
+        case GamepadButton.r2Button:
+        case GamepadButton.dpad:
+          return (label: '', key: 0);
+      }
+    // Nintendo 64. A/B corrected: the core puts N64 A on RetroPad B and N64
+    // B on RetroPad Y. Z is a trigger on JOYPAD_L2, not Select.
+    case GamePlatform.n64:
+      switch (slot) {
+        case GamepadButton.aButton:
+          return (label: 'A', key: GBAKey.b);
+        case GamepadButton.bButton:
+          return (label: 'B', key: GBAKey.y);
+        case GamepadButton.lButton:
+          return (label: 'L', key: GBAKey.l);
+        case GamepadButton.rButton:
+          return (label: 'R', key: GBAKey.r);
+        case GamepadButton.selectButton:
+          return (label: 'Z', key: GBAKey.l2);
+        case GamepadButton.startButton:
+          return (label: 'START', key: GBAKey.start);
+        // N64 routes Z to the Select slot; L2/R2 slots are unused.
+        case GamepadButton.xButton:
+        case GamepadButton.yButton:
+        case GamepadButton.l2Button:
+        case GamepadButton.r2Button:
+        case GamepadButton.dpad:
+          return (label: '', key: 0);
+      }
+    // RetroPad-identity cores (GB/GBC/GBA/NES/SNES/PS1/NDS, etc.).
+    default:
+      switch (slot) {
+        case GamepadButton.aButton:
+          return (label: 'A', key: GBAKey.a);
+        case GamepadButton.bButton:
+          return (label: 'B', key: GBAKey.b);
+        case GamepadButton.xButton:
+          return (label: 'X', key: GBAKey.x);
+        case GamepadButton.yButton:
+          return (label: 'Y', key: GBAKey.y);
+        case GamepadButton.lButton:
+          return (label: 'L', key: GBAKey.l);
+        case GamepadButton.rButton:
+          return (label: 'R', key: GBAKey.r);
+        case GamepadButton.startButton:
+          return (label: 'START', key: GBAKey.start);
+        case GamepadButton.selectButton:
+          return (label: 'SELECT', key: GBAKey.select);
+        // PS1 triggers (RetroPad L2/R2). Other RetroPad-identity platforms
+        // simply never render these slots (gated by showL2R2).
+        case GamepadButton.l2Button:
+          return (label: 'L2', key: GBAKey.l2);
+        case GamepadButton.r2Button:
+          return (label: 'R2', key: GBAKey.r2);
+        case GamepadButton.dpad:
+          return (label: '', key: 0);
+      }
+  }
+}
+
 class _VirtualGamepadState extends State<VirtualGamepad> {
   int _currentKeys = 0;
   GamepadButton? _selectedButton;
   late GamepadLayout _editingLayout;
   late GamepadSkinData _resolvedSkin;
 
+  /// Cooldown guard so rapid touch events don't spam the haptic engine.
   final Stopwatch _hapticCooldown = Stopwatch();
   static const Duration _hapticMinInterval = Duration(milliseconds: 60);
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    // Resolve the skin using the current theme from the widget tree.
+    // This runs after initState and whenever Theme changes.
     _resolvedSkin = GamepadSkinData.resolve(
       widget.skin,
       AppColorTheme.of(context),
@@ -82,7 +189,7 @@ class _VirtualGamepadState extends State<VirtualGamepad> {
   }
 
   void _updateKey(int key, bool pressed) {
-    if (widget.editMode) return; 
+    if (widget.editMode) return; // Disable input in edit mode
 
     final newKeys = pressed ? (_currentKeys | key) : (_currentKeys & ~key);
 
@@ -104,45 +211,20 @@ class _VirtualGamepadState extends State<VirtualGamepad> {
   void _onButtonDrag(GamepadButton button, Offset delta, Size screenSize) {
     if (!widget.editMode) return;
 
-    final bool isPortrait = screenSize.height > screenSize.width;
-    final Rect gameRect = widget.gameRect;
-
     setState(() {
       _selectedButton = button;
       final currentLayout = _getButtonLayout(button);
 
-      double newX, newY;
-      final double marginPercent = 0.02;
-
-      if (isPortrait) {
-        final double marginX = screenSize.width * marginPercent;
-        final double marginY = screenSize.height * marginPercent;
-        final double usableWidth = screenSize.width - marginX * 2;
-        final double usableHeight = screenSize.height - marginY * 2;
-
-        newX = (currentLayout.x + delta.dx / usableWidth).clamp(0.0, 1.0);
-        newY = (currentLayout.y + delta.dy / usableHeight).clamp(0.0, 1.0);
-      } else {
-        final double edgePadding = screenSize.width * marginPercent;
-        final double gameGap = screenSize.width * 0.01;
-
-        final bool isLeftSide =
-            button == GamepadButton.dpad ||
-            button == GamepadButton.lButton ||
-            button == GamepadButton.selectButton;
-
-        final double zoneWidth = isLeftSide
-            ? math.max(1, gameRect.left - gameGap - edgePadding)
-            : math.max(
-                1,
-                screenSize.width - edgePadding - gameRect.right - gameGap,
-              );
-
-        final double usableHeight = screenSize.height - edgePadding * 2;
-
-        newX = (currentLayout.x + delta.dx / zoneWidth).clamp(0.0, 1.0);
-        newY = (currentLayout.y + delta.dy / usableHeight).clamp(0.0, 1.0);
-      }
+      // Positions are pure fractions of the full screen, so a drag delta in
+      // pixels maps directly to a delta in screen fractions. Same math for
+      // every orientation and platform — and only THIS button is touched,
+      // so dragging it never disturbs any other button.
+      final double newX = (currentLayout.x + delta.dx / screenSize.width).clamp(
+        0.0,
+        1.0,
+      );
+      final double newY = (currentLayout.y + delta.dy / screenSize.height)
+          .clamp(0.0, 1.0);
 
       _editingLayout = _updateButtonLayout(
         button,
@@ -153,8 +235,11 @@ class _VirtualGamepadState extends State<VirtualGamepad> {
     widget.onLayoutChanged?.call(_editingLayout);
   }
 
+  /// Minimum touch target in logical pixels (per Material Design guidelines).
   static const double _minTouchTarget = 36.0;
 
+  /// Per-button-type scale limits.
+  /// D-pad / joystick can be larger; small utility buttons have a tighter range.
   static (double min, double max) _sizeRange(GamepadButton button) {
     return switch (button) {
       GamepadButton.dpad => (0.70, 2.50),
@@ -166,6 +251,8 @@ class _VirtualGamepadState extends State<VirtualGamepad> {
       GamepadButton.rButton => (0.80, 2.00),
       GamepadButton.startButton => (0.80, 1.80),
       GamepadButton.selectButton => (0.80, 1.80),
+      GamepadButton.l2Button => (0.80, 1.80),
+      GamepadButton.r2Button => (0.80, 1.80),
     };
   }
 
@@ -180,12 +267,16 @@ class _VirtualGamepadState extends State<VirtualGamepad> {
         minScale,
         maxScale,
       );
-      final gameRect = widget.gameRect;
+
+      // Enforce a minimum pixel size so the button stays tappable.
+      // Compute the smallest dimension at the candidate scale and reject
+      // the resize if it would drop below the touch-target threshold.
+      // Size is referenced to the screen (a phone-border constant), never the
+      // game rectangle — so changing the game size never rescales the buttons.
+      final screen = MediaQuery.of(context).size;
       final isPortrait =
           MediaQuery.of(context).orientation == Orientation.portrait;
-      final sizeRef = isPortrait
-          ? gameRect.width
-          : MediaQuery.of(context).size.height;
+      final sizeRef = isPortrait ? screen.width : screen.height;
       final baseSize = isPortrait ? sizeRef * 0.28 : sizeRef * 0.26;
       final buttonBase = isPortrait ? sizeRef * 0.17 : sizeRef * 0.16;
 
@@ -200,13 +291,17 @@ class _VirtualGamepadState extends State<VirtualGamepad> {
           smallestDim = buttonBase * newSize * widget.scale;
         case GamepadButton.lButton:
         case GamepadButton.rButton:
+          // Height is the smallest dimension for shoulder buttons
           smallestDim = baseSize * 0.30 * newSize * widget.scale;
         case GamepadButton.startButton:
         case GamepadButton.selectButton:
+        case GamepadButton.l2Button:
+        case GamepadButton.r2Button:
           smallestDim = baseSize * 0.12 * newSize * widget.scale;
       }
 
       if (smallestDim < _minTouchTarget && scaleDelta < 0) {
+        // Would shrink below minimum tappable size — ignore
         return;
       }
 
@@ -217,6 +312,10 @@ class _VirtualGamepadState extends State<VirtualGamepad> {
     });
 
     widget.onLayoutChanged?.call(_editingLayout);
+  }
+
+  ({String label, int key}) _slotBinding(GamepadButton slot) {
+    return virtualGamepadSlotBinding(widget.platform, slot);
   }
 
   ButtonLayout _getButtonLayout(GamepadButton button) {
@@ -236,10 +335,61 @@ class _VirtualGamepadState extends State<VirtualGamepad> {
       case GamepadButton.selectButton:
         return _editingLayout.selectButton;
       case GamepadButton.xButton:
-        return _editingLayout.xButton ?? GamepadLayout.defaultPortrait.xButton!;
+        return _editingLayout.xButton ?? _defaultXY(GamepadButton.xButton);
       case GamepadButton.yButton:
-        return _editingLayout.yButton ?? GamepadLayout.defaultPortrait.yButton!;
+        return _editingLayout.yButton ?? _defaultXY(GamepadButton.yButton);
+      case GamepadButton.l2Button:
+        return _editingLayout.l2Button ?? _defaultL2R2(GamepadButton.l2Button);
+      case GamepadButton.r2Button:
+        return _editingLayout.r2Button ?? _defaultL2R2(GamepadButton.r2Button);
     }
+  }
+
+  /// Fallback position for an X/Y slot when the active layout has none saved
+  /// (e.g. an older two-button layout for a platform that now shows X/Y).
+  /// Uses the platform's own default for the current orientation so the
+  /// button lands in a sensible spot instead of snapping to a portrait
+  /// SNES position while in landscape.
+  ButtonLayout _defaultXY(GamepadButton slot) {
+    final landscape =
+        MediaQuery.of(context).orientation == Orientation.landscape;
+    final platformDefault = GamepadLayout.defaultForPlatform(
+      widget.platform,
+      landscape: landscape,
+    );
+    final generic = landscape
+        ? GamepadLayout.defaultLandscape
+        : GamepadLayout.defaultPortrait;
+    return slot == GamepadButton.xButton
+        ? (platformDefault.xButton ?? generic.xButton!)
+        : (platformDefault.yButton ?? generic.yButton!);
+  }
+
+  /// Fallback position for an L2/R2 trigger when the active layout has none
+  /// saved (e.g. a PS1 layout created before L2/R2 became editable). Uses the
+  /// platform's own default for the current orientation, and if that is also
+  /// missing, derives a spot just above the matching L/R shoulder.
+  ButtonLayout _defaultL2R2(GamepadButton slot) {
+    final landscape =
+        MediaQuery.of(context).orientation == Orientation.landscape;
+    final platformDefault = GamepadLayout.defaultForPlatform(
+      widget.platform,
+      landscape: landscape,
+    );
+    final isL = slot == GamepadButton.l2Button;
+    final fromDefault = isL
+        ? platformDefault.l2Button
+        : platformDefault.r2Button;
+    if (fromDefault != null) return fromDefault;
+    // Derive from the shoulder: sit clearly above it, leaving enough room for
+    // the compact trigger height and edit handles.
+    final shoulder = isL ? platformDefault.lButton : platformDefault.rButton;
+    final yOffset = landscape ? 0.12 : 0.10;
+    return ButtonLayout(
+      x: shoulder.x,
+      y: (shoulder.y - yOffset).clamp(0.0, 1.0),
+      size: 0.90,
+    );
   }
 
   GamepadLayout _updateButtonLayout(GamepadButton button, ButtonLayout layout) {
@@ -262,6 +412,10 @@ class _VirtualGamepadState extends State<VirtualGamepad> {
         return _editingLayout.copyWith(xButton: layout);
       case GamepadButton.yButton:
         return _editingLayout.copyWith(yButton: layout);
+      case GamepadButton.l2Button:
+        return _editingLayout.copyWith(l2Button: layout);
+      case GamepadButton.r2Button:
+        return _editingLayout.copyWith(r2Button: layout);
     }
   }
 
@@ -274,36 +428,52 @@ class _VirtualGamepadState extends State<VirtualGamepad> {
         builder: (context, constraints) {
           final screenSize = Size(constraints.maxWidth, constraints.maxHeight);
           final layout = _editingLayout;
-          final gameRect = widget.gameRect;
-          final isPortrait =
-              MediaQuery.of(context).orientation == Orientation.portrait;
+          final mediaQuery = MediaQuery.of(context);
 
-          final sizeRef = isPortrait ? gameRect.width : screenSize.height;
+          // Button sizes are referenced to the screen only (width in portrait,
+          // height in landscape) — a phone-border constant. They never depend
+          // on the game rectangle, so resizing/moving the game leaves the
+          // controls untouched.
+          final isPortrait = mediaQuery.orientation == Orientation.portrait;
+          final safePadding = mediaQuery.padding;
+
+          final sizeRef = isPortrait ? screenSize.width : screenSize.height;
 
           final baseSize = isPortrait ? sizeRef * 0.28 : sizeRef * 0.26;
 
           final buttonBase = isPortrait ? sizeRef * 0.17 : sizeRef * 0.16;
+          // D-pad / joystick boost: 10% bigger in portrait, 25% bigger in
+          // landscape (user request — gives more comfortable thumb target).
           final dpadBoost = isPortrait ? 1.1 : 1.25;
+
+          // Use cached skin data (resolved in initState / didUpdateWidget)
           final skin = _resolvedSkin;
+
+          // Pre-compute child sizes for each button so the clamp logic can
+          // keep the entire widget on screen, not just its top-left corner.
           final dpadScale = layout.dpad.size * widget.scale * dpadBoost;
           final dpadSize = Size(baseSize * dpadScale, baseSize * dpadScale);
 
           final aSize = buttonBase * layout.aButton.size * widget.scale;
           final bSize = buttonBase * layout.bButton.size * widget.scale;
 
+          // Genesis/Mega Drive carries its X and Y on the L/R slots but draws
+          // them as round face buttons (not shoulders) so the 6-button grid
+          // stays uniform. Size them like the A/B circles in that case.
+          final bool mdFaceButtons = widget.platform == GamePlatform.md;
+
           final lScale = layout.lButton.size * widget.scale;
-          final lSize = Size(
-            baseSize * 0.55 * lScale,
-            baseSize * 0.30 * lScale,
-          );
+          final lSize = mdFaceButtons
+              ? Size(buttonBase * lScale, buttonBase * lScale)
+              : Size(baseSize * 0.55 * lScale, baseSize * 0.30 * lScale);
 
           final rScale = layout.rButton.size * widget.scale;
-          final rSize = Size(
-            baseSize * 0.55 * rScale,
-            baseSize * 0.30 * rScale,
-          );
+          final rSize = mdFaceButtons
+              ? Size(buttonBase * rScale, buttonBase * rScale)
+              : Size(baseSize * 0.55 * rScale, baseSize * 0.30 * rScale);
 
           final startScale = layout.startButton.size * widget.scale;
+          // SmallButton uses padding; approximate outer size
           final startSize = Size(
             baseSize * 0.20 * startScale + baseSize * 0.20 * startScale,
             baseSize * 0.12 * startScale + baseSize * 0.12 * startScale,
@@ -314,15 +484,59 @@ class _VirtualGamepadState extends State<VirtualGamepad> {
             baseSize * 0.20 * selectScale + baseSize * 0.20 * selectScale,
             baseSize * 0.12 * selectScale + baseSize * 0.12 * selectScale,
           );
-          final bool showLR =
-              widget.platform != GamePlatform.nes &&
-              widget.platform != GamePlatform.sms &&
-              widget.platform != GamePlatform.gg &&
-              widget.platform != GamePlatform.sg1000;
-          final bool showXY =
-              widget.platform == GamePlatform.snes ||
-              widget.platform == GamePlatform.md ||
-              widget.platform == GamePlatform.n64;
+
+          // ── Determine active buttons based on platform ──
+          final bool showLR = switch (widget.platform) {
+            GamePlatform.gba ||
+            GamePlatform.snes ||
+            GamePlatform.md ||
+            GamePlatform.n64 ||
+            GamePlatform.vb ||
+            GamePlatform.nds ||
+            GamePlatform.ps1 ||
+            // Intellivision: L/R open the FreeIntv keypad (per the core's
+            // in-game help — "L/R → SHOW KEYPAD").
+            GamePlatform.intv => true,
+            _ => false,
+          };
+          // N64 omitted on purpose: its X/Y slots would be the C-buttons,
+          // which live on the right analog stick and need native support.
+          // Showing them would send the wrong input, so they stay hidden.
+          final bool showXY = switch (widget.platform) {
+            GamePlatform.snes ||
+            GamePlatform.md ||
+            GamePlatform.nds ||
+            GamePlatform.ps1 ||
+            // Intellivision: Y = top action button, X = repeat last keypad
+            // entry (per the core's in-game help screen).
+            GamePlatform.intv => true,
+            _ => false,
+          };
+          // PS1 adds L2/R2 triggers. They are full members of the editable
+          // layout (own position + size, persisted), sized like Start/Select.
+          final bool showL2R2 = widget.platform == GamePlatform.ps1;
+
+          // PS1 L2/R2 trigger sizes (small buttons; only computed for PS1).
+          final l2Scale =
+              (showL2R2
+                  ? _getButtonLayout(GamepadButton.l2Button).size
+                  : 0.90) *
+              widget.scale;
+          final r2Scale =
+              (showL2R2
+                  ? _getButtonLayout(GamepadButton.r2Button).size
+                  : 0.90) *
+              widget.scale;
+          final l2Size = Size(
+            baseSize * 0.20 * l2Scale + baseSize * 0.20 * l2Scale,
+            baseSize * 0.12 * l2Scale + baseSize * 0.12 * l2Scale,
+          );
+          final r2Size = Size(
+            baseSize * 0.20 * r2Scale + baseSize * 0.20 * r2Scale,
+            baseSize * 0.12 * r2Scale + baseSize * 0.12 * r2Scale,
+          );
+
+          // ── Pre-compute all button sizes ──
           final buttonSizes = <GamepadButton, Size>{
             GamepadButton.dpad: dpadSize,
             GamepadButton.aButton: Size(aSize, aSize),
@@ -331,35 +545,37 @@ class _VirtualGamepadState extends State<VirtualGamepad> {
             if (showLR) GamepadButton.rButton: rSize,
             GamepadButton.startButton: startSize,
             GamepadButton.selectButton: selectSize,
+            if (showL2R2) GamepadButton.l2Button: l2Size,
+            if (showL2R2) GamepadButton.r2Button: r2Size,
           };
+
+          // SNES X / Y sizes (same sizing logic as A/B)
           if (showXY) {
-            final xLayout =
-                layout.xButton ?? GamepadLayout.defaultPortrait.xButton!;
-            final yLayout =
-                layout.yButton ?? GamepadLayout.defaultPortrait.yButton!;
+            final xLayout = _getButtonLayout(GamepadButton.xButton);
+            final yLayout = _getButtonLayout(GamepadButton.yButton);
             final xSize = buttonBase * xLayout.size * widget.scale;
             final ySize = buttonBase * yLayout.size * widget.scale;
             buttonSizes[GamepadButton.xButton] = Size(xSize, xSize);
             buttonSizes[GamepadButton.yButton] = Size(ySize, ySize);
           }
-          final rawPositions = <GamepadButton, Offset>{};
+
+          // ── Compute each button's pixel position independently ──
+          // Each position comes purely from that button's own screen
+          // fraction. Buttons are never nudged to avoid one another, so the
+          // arrangement the user makes is exactly what renders.
+          final resolvedPositions = <GamepadButton, Offset>{};
           for (final btn in buttonSizes.keys) {
-            rawPositions[btn] = _computeButtonPosition(
+            resolvedPositions[btn] = _computeButtonPosition(
               layout: _getButtonLayout(btn),
               screenSize: screenSize,
-              button: btn,
+              safePadding: safePadding,
               childSize: buttonSizes[btn]!,
             );
           }
-          final resolvedPositions = _resolveCollisions(
-            positions: rawPositions,
-            sizes: buttonSizes,
-            screenSize: screenSize,
-            isPortrait: isPortrait,
-          );
 
           return Stack(
             children: [
+              // D-Pad or Joystick
               _buildButtonAtPosition(
                 position: resolvedPositions[GamepadButton.dpad]!,
                 button: GamepadButton.dpad,
@@ -374,6 +590,7 @@ class _VirtualGamepadState extends State<VirtualGamepad> {
                         },
                         onAnalogChanged: widget.onAnalogChanged != null
                             ? (x, y) {
+                                // Normalize from [-1.0, 1.0] to [-32768, 32767]
                                 final analogX = (x * 32767).toInt();
                                 final analogY = (y * 32767).toInt();
                                 widget.onAnalogChanged!(
@@ -400,271 +617,287 @@ class _VirtualGamepadState extends State<VirtualGamepad> {
                         skin: skin,
                       ),
               ),
+
+              // A Button
               _buildButtonAtPosition(
                 position: resolvedPositions[GamepadButton.aButton]!,
                 button: GamepadButton.aButton,
                 screenSize: screenSize,
                 child: _CircleButton(
-                  label: 'A',
+                  label: _slotBinding(GamepadButton.aButton).label,
                   color: colors.accentAlt,
-                  onChanged: (pressed) => _updateKey(GBAKey.a, pressed),
+                  onChanged: (pressed) => _updateKey(
+                    _slotBinding(GamepadButton.aButton).key,
+                    pressed,
+                  ),
                   size: aSize,
                   editMode: widget.editMode,
                   skin: skin,
                 ),
               ),
+
+              // B Button
               _buildButtonAtPosition(
                 position: resolvedPositions[GamepadButton.bButton]!,
                 button: GamepadButton.bButton,
                 screenSize: screenSize,
                 child: _CircleButton(
-                  label: 'B',
+                  label: _slotBinding(GamepadButton.bButton).label,
                   color: colors.accentYellow,
-                  onChanged: (pressed) => _updateKey(GBAKey.b, pressed),
+                  onChanged: (pressed) => _updateKey(
+                    _slotBinding(GamepadButton.bButton).key,
+                    pressed,
+                  ),
                   size: bSize,
                   editMode: widget.editMode,
                   skin: skin,
                 ),
               ),
+
+              // L slot — shoulder for most cores; Genesis X face circle.
               if (showLR)
                 _buildButtonAtPosition(
                   position: resolvedPositions[GamepadButton.lButton]!,
                   button: GamepadButton.lButton,
                   screenSize: screenSize,
-                  child: _ShoulderButton(
-                    label: 'L',
-                    onChanged: (pressed) => _updateKey(GBAKey.l, pressed),
-                    scale: lScale,
-                    baseSize: baseSize,
-                    editMode: widget.editMode,
-                    skin: skin,
-                  ),
+                  child: mdFaceButtons
+                      ? _CircleButton(
+                          label: _slotBinding(GamepadButton.lButton).label,
+                          color: colors.primary,
+                          onChanged: (pressed) => _updateKey(
+                            _slotBinding(GamepadButton.lButton).key,
+                            pressed,
+                          ),
+                          size: lSize.width,
+                          editMode: widget.editMode,
+                          skin: skin,
+                        )
+                      : _ShoulderButton(
+                          label: _slotBinding(GamepadButton.lButton).label,
+                          onChanged: (pressed) => _updateKey(
+                            _slotBinding(GamepadButton.lButton).key,
+                            pressed,
+                          ),
+                          scale: lScale,
+                          baseSize: baseSize,
+                          editMode: widget.editMode,
+                          skin: skin,
+                        ),
                 ),
+
+              // R slot — shoulder for most cores; Genesis Y face circle.
               if (showLR)
                 _buildButtonAtPosition(
                   position: resolvedPositions[GamepadButton.rButton]!,
                   button: GamepadButton.rButton,
                   screenSize: screenSize,
-                  child: _ShoulderButton(
-                    label: 'R',
-                    onChanged: (pressed) => _updateKey(GBAKey.r, pressed),
-                    scale: rScale,
-                    baseSize: baseSize,
-                    editMode: widget.editMode,
-                    skin: skin,
-                  ),
+                  child: mdFaceButtons
+                      ? _CircleButton(
+                          label: _slotBinding(GamepadButton.rButton).label,
+                          color: colors.success,
+                          onChanged: (pressed) => _updateKey(
+                            _slotBinding(GamepadButton.rButton).key,
+                            pressed,
+                          ),
+                          size: rSize.width,
+                          editMode: widget.editMode,
+                          skin: skin,
+                        )
+                      : _ShoulderButton(
+                          label: _slotBinding(GamepadButton.rButton).label,
+                          onChanged: (pressed) => _updateKey(
+                            _slotBinding(GamepadButton.rButton).key,
+                            pressed,
+                          ),
+                          scale: rScale,
+                          baseSize: baseSize,
+                          editMode: widget.editMode,
+                          skin: skin,
+                        ),
                 ),
+
+              // Face button X slot (SNES X, Genesis C)
               if (showXY)
                 _buildButtonAtPosition(
                   position: resolvedPositions[GamepadButton.xButton]!,
                   button: GamepadButton.xButton,
                   screenSize: screenSize,
                   child: _CircleButton(
-                    label: 'X',
+                    label: _slotBinding(GamepadButton.xButton).label,
                     color: colors.primary,
-                    onChanged: (pressed) => _updateKey(GBAKey.x, pressed),
+                    onChanged: (pressed) => _updateKey(
+                      _slotBinding(GamepadButton.xButton).key,
+                      pressed,
+                    ),
                     size: buttonSizes[GamepadButton.xButton]!.width,
                     editMode: widget.editMode,
                     skin: skin,
                   ),
                 ),
+
+              // Face button Y slot (SNES Y, Genesis Z)
               if (showXY)
                 _buildButtonAtPosition(
                   position: resolvedPositions[GamepadButton.yButton]!,
                   button: GamepadButton.yButton,
                   screenSize: screenSize,
                   child: _CircleButton(
-                    label: 'Y',
+                    label: _slotBinding(GamepadButton.yButton).label,
                     color: colors.success,
-                    onChanged: (pressed) => _updateKey(GBAKey.y, pressed),
+                    onChanged: (pressed) => _updateKey(
+                      _slotBinding(GamepadButton.yButton).key,
+                      pressed,
+                    ),
                     size: buttonSizes[GamepadButton.yButton]!.width,
                     editMode: widget.editMode,
                     skin: skin,
                   ),
                 ),
+
+              // Start Button
               _buildButtonAtPosition(
                 position: resolvedPositions[GamepadButton.startButton]!,
                 button: GamepadButton.startButton,
                 screenSize: screenSize,
                 child: _SmallButton(
-                  label: 'START',
-                  onChanged: (pressed) => _updateKey(GBAKey.start, pressed),
+                  label: _slotBinding(GamepadButton.startButton).label,
+                  onChanged: (pressed) => _updateKey(
+                    _slotBinding(GamepadButton.startButton).key,
+                    pressed,
+                  ),
                   scale: startScale,
                   baseSize: baseSize,
                   editMode: widget.editMode,
                   skin: skin,
                 ),
               ),
+
+              // Select Button (labelled MODE for Genesis, Z for N64)
               _buildButtonAtPosition(
                 position: resolvedPositions[GamepadButton.selectButton]!,
                 button: GamepadButton.selectButton,
                 screenSize: screenSize,
                 child: _SmallButton(
-                  label: widget.platform == GamePlatform.n64 ? 'Z' : 'SELECT',
-                  onChanged: (pressed) => _updateKey(GBAKey.select, pressed),
+                  label: _slotBinding(GamepadButton.selectButton).label,
+                  onChanged: (pressed) => _updateKey(
+                    _slotBinding(GamepadButton.selectButton).key,
+                    pressed,
+                  ),
                   scale: selectScale,
                   baseSize: baseSize,
                   editMode: widget.editMode,
                   skin: skin,
                 ),
               ),
+
+              // ── PS1 L2 / R2 triggers (editable) ──────────────────────
+              // Full members of the editable layout: their position and size
+              // come from resolvedPositions/buttonSizes and are persisted, so
+              // they drag and resize like every other button (and only overlap
+              // L/R if the user deliberately places them there). Defaults sit
+              // just above the L/R shoulders.
+              if (showL2R2 && resolvedPositions[GamepadButton.l2Button] != null)
+                _buildButtonAtPosition(
+                  position: resolvedPositions[GamepadButton.l2Button]!,
+                  button: GamepadButton.l2Button,
+                  screenSize: screenSize,
+                  child: _SmallButton(
+                    label: _slotBinding(GamepadButton.l2Button).label,
+                    onChanged: (pressed) => _updateKey(
+                      _slotBinding(GamepadButton.l2Button).key,
+                      pressed,
+                    ),
+                    scale: l2Scale,
+                    baseSize: baseSize,
+                    editMode: widget.editMode,
+                    skin: skin,
+                  ),
+                ),
+              if (showL2R2 && resolvedPositions[GamepadButton.r2Button] != null)
+                _buildButtonAtPosition(
+                  position: resolvedPositions[GamepadButton.r2Button]!,
+                  button: GamepadButton.r2Button,
+                  screenSize: screenSize,
+                  child: _SmallButton(
+                    label: _slotBinding(GamepadButton.r2Button).label,
+                    onChanged: (pressed) => _updateKey(
+                      _slotBinding(GamepadButton.r2Button).key,
+                      pressed,
+                    ),
+                    scale: r2Scale,
+                    baseSize: baseSize,
+                    editMode: widget.editMode,
+                    skin: skin,
+                  ),
+                ),
             ],
           );
         },
       ),
     );
   }
+
+  // ────────────────────────────────────────────────────────────────
+  // Position computation — pure function, no widget creation.
+  //
+  // A button's top-left corner is simply its (x, y) fraction times the
+  // screen size — anchored to the phone borders and nothing else. The only
+  // adjustment is a clamp that keeps the whole button on screen (and, in
+  // landscape, below the in-game top toolbar). The clamp depends solely on
+  // the screen and the button's own size, never on the game or other buttons.
+  // ────────────────────────────────────────────────────────────────
   Offset _computeButtonPosition({
     required ButtonLayout layout,
     required Size screenSize,
-    required GamepadButton button,
+    required EdgeInsets safePadding,
     required Size childSize,
   }) {
-    final Rect gameRect = widget.gameRect;
     final bool isPortrait = screenSize.height > screenSize.width;
 
-    double x = 0.0;
-    double y = 0.0;
+    final double x = layout.x * screenSize.width;
+    final double y = layout.y * screenSize.height;
 
-    const double marginPercent = 0.02;
-
-    if (isPortrait) {
-      final double widgetW = screenSize.width;
-      final double widgetH = screenSize.height;
-      final double marginX = widgetW * marginPercent;
-      final double marginY = widgetH * marginPercent;
-      final double usableWidth = widgetW - marginX * 2;
-      final double usableHeight = widgetH - marginY * 2;
-      x = marginX + layout.x * usableWidth;
-      y = marginY + layout.y * usableHeight;
-    } else {
-      final double screenW = screenSize.width;
-      final double screenH = screenSize.height;
-      final double edgePadding = screenW * marginPercent;
-      final double gameGap = screenW * 0.01;
-
-      final double leftZoneLeft = edgePadding;
-      final double leftZoneRight = gameRect.left - gameGap;
-      final double leftZoneWidth = math.max(0, leftZoneRight - leftZoneLeft);
-
-      final double rightZoneLeft = gameRect.right + gameGap;
-      final double rightZoneRight = screenW - edgePadding;
-      final double rightZoneWidth = math.max(0, rightZoneRight - rightZoneLeft);
-
-      final double marginY = edgePadding;
-      final double usableHeight = screenH - marginY * 2;
-
-      final bool isLeftSide =
-          button == GamepadButton.dpad ||
-          button == GamepadButton.lButton ||
-          button == GamepadButton.selectButton;
-
-      if (isLeftSide) {
-        x = leftZoneLeft + layout.x * leftZoneWidth;
-      } else {
-        x = rightZoneLeft + layout.x * rightZoneWidth;
-      }
-      y = marginY + layout.y * usableHeight;
-    }
+    // ── Safe clamp: keep the whole button on screen. In landscape, reserve
+    // a top strip so buttons never hide under the in-game toolbar. Device
+    // safe areas only affect the final clamp, so normalized layouts remain
+    // consistent across phones while still avoiding notches/gesture bars.
     final double minMargin = screenSize.width * 0.01;
+    final double minXMargin = math.max(minMargin, safePadding.left + minMargin);
+    final double maxXMargin = math.max(
+      minMargin,
+      safePadding.right + minMargin,
+    );
     final double minYMargin = isPortrait
         ? minMargin
         : (screenSize.width * 0.107).clamp(36.0, 56.0) +
               screenSize.height * 0.02;
+    final double minSafeYMargin = math.max(
+      minYMargin,
+      safePadding.top + minMargin,
+    );
+    final double maxYMargin = math.max(
+      minMargin,
+      safePadding.bottom + minMargin,
+    );
 
     final double clampedX = x.clamp(
-      minMargin,
-      math.max(minMargin, screenSize.width - childSize.width - minMargin),
+      minXMargin,
+      math.max(minXMargin, screenSize.width - childSize.width - maxXMargin),
     );
     final double clampedY = y.clamp(
-      minYMargin,
-      math.max(minYMargin, screenSize.height - childSize.height - minMargin),
+      minSafeYMargin,
+      math.max(
+        minSafeYMargin,
+        screenSize.height - childSize.height - maxYMargin,
+      ),
     );
 
     return Offset(clampedX, clampedY);
   }
-  Map<GamepadButton, Offset> _resolveCollisions({
-    required Map<GamepadButton, Offset> positions,
-    required Map<GamepadButton, Size> sizes,
-    required Size screenSize,
-    required bool isPortrait,
-  }) {
-    final double minGap = math.min(screenSize.width, screenSize.height) * 0.015;
 
-    final double minMargin = screenSize.width * 0.01;
-    final double minYMargin = isPortrait
-        ? minMargin
-        : (screenSize.width * 0.107).clamp(36.0, 56.0) +
-              screenSize.height * 0.02;
-    final pos = Map<GamepadButton, Offset>.from(positions);
-    for (int iter = 0; iter < 4; iter++) {
-      bool moved = false;
-      final buttons = positions.keys.toList();
-      for (int i = 0; i < buttons.length; i++) {
-        for (int j = i + 1; j < buttons.length; j++) {
-          final a = buttons[i];
-          final b = buttons[j];
-          final sa = sizes[a]!;
-          final sb = sizes[b]!;
-          final rA = Rect.fromLTWH(
-            pos[a]!.dx - minGap / 2,
-            pos[a]!.dy - minGap / 2,
-            sa.width + minGap,
-            sa.height + minGap,
-          );
-          final rB = Rect.fromLTWH(
-            pos[b]!.dx - minGap / 2,
-            pos[b]!.dy - minGap / 2,
-            sb.width + minGap,
-            sb.height + minGap,
-          );
-
-          if (!rA.overlaps(rB)) continue;
-
-          moved = true;
-          final overlapX =
-              math.min(rA.right, rB.right) - math.max(rA.left, rB.left);
-          final overlapY =
-              math.min(rA.bottom, rB.bottom) - math.max(rA.top, rB.top);
-          if (overlapX < overlapY) {
-            final half = overlapX / 2 + 0.5; 
-            final sign = pos[a]!.dx <= pos[b]!.dx ? -1.0 : 1.0;
-            pos[a] = Offset(pos[a]!.dx + sign * half, pos[a]!.dy);
-            pos[b] = Offset(pos[b]!.dx - sign * half, pos[b]!.dy);
-          } else {
-            final half = overlapY / 2 + 0.5;
-            final sign = pos[a]!.dy <= pos[b]!.dy ? -1.0 : 1.0;
-            pos[a] = Offset(pos[a]!.dx, pos[a]!.dy + sign * half);
-            pos[b] = Offset(pos[b]!.dx, pos[b]!.dy - sign * half);
-          }
-          pos[a] = Offset(
-            pos[a]!.dx.clamp(
-              minMargin,
-              math.max(minMargin, screenSize.width - sa.width - minMargin),
-            ),
-            pos[a]!.dy.clamp(
-              minYMargin,
-              math.max(minYMargin, screenSize.height - sa.height - minMargin),
-            ),
-          );
-          pos[b] = Offset(
-            pos[b]!.dx.clamp(
-              minMargin,
-              math.max(minMargin, screenSize.width - sb.width - minMargin),
-            ),
-            pos[b]!.dy.clamp(
-              minYMargin,
-              math.max(minYMargin, screenSize.height - sb.height - minMargin),
-            ),
-          );
-        }
-      }
-
-      if (!moved) break; 
-    }
-
-    return pos;
-  }
+  // ────────────────────────────────────────────────────────────────
+  // Build a positioned button widget at a pre-computed position
+  // ────────────────────────────────────────────────────────────────
   Widget _buildButtonAtPosition({
     required Offset position,
     required GamepadButton button,
@@ -690,6 +923,7 @@ class _VirtualGamepadState extends State<VirtualGamepad> {
   }
 }
 
+/// Wrapper for making buttons editable (draggable + resizable)
 class _EditableButtonWrapper extends StatelessWidget {
   final Widget child;
   final bool isSelected;
@@ -716,6 +950,7 @@ class _EditableButtonWrapper extends StatelessWidget {
       child: Stack(
         clipBehavior: Clip.none,
         children: [
+          // Selection indicator
           if (isSelected)
             Positioned.fill(
               child: Container(
@@ -725,8 +960,13 @@ class _EditableButtonWrapper extends StatelessWidget {
                 ),
               ),
             ),
+
+          // The actual button
           child,
+
+          // Resize controls (only when selected)
           if (isSelected) ...[
+            // Scale up button
             Positioned(
               top: -20,
               right: -20,
@@ -744,6 +984,7 @@ class _EditableButtonWrapper extends StatelessWidget {
                 ),
               ),
             ),
+            // Scale down button
             Positioned(
               bottom: -20,
               right: -20,
@@ -772,6 +1013,7 @@ class _EditableButtonWrapper extends StatelessWidget {
   }
 }
 
+/// D-Pad widget
 class _DPad extends StatefulWidget {
   final void Function(bool up, bool down, bool left, bool right)
   onDirectionChanged;
@@ -855,6 +1097,7 @@ class _DPadState extends State<_DPad> {
         height: size,
         child: Stack(
           children: [
+            // Background
             Center(
               child: Container(
                 width: size - 16,
@@ -870,6 +1113,8 @@ class _DPadState extends State<_DPad> {
                 ),
               ),
             ),
+
+            // Up
             Positioned(
               top: 0,
               left: (size - buttonSize) / 2,
@@ -880,6 +1125,8 @@ class _DPadState extends State<_DPad> {
                 skin: widget.skin,
               ),
             ),
+
+            // Down
             Positioned(
               bottom: 0,
               left: (size - buttonSize) / 2,
@@ -890,6 +1137,8 @@ class _DPadState extends State<_DPad> {
                 skin: widget.skin,
               ),
             ),
+
+            // Left
             Positioned(
               left: 0,
               top: (size - buttonSize) / 2,
@@ -900,6 +1149,8 @@ class _DPadState extends State<_DPad> {
                 skin: widget.skin,
               ),
             ),
+
+            // Right
             Positioned(
               right: 0,
               top: (size - buttonSize) / 2,
@@ -910,6 +1161,8 @@ class _DPadState extends State<_DPad> {
                 skin: widget.skin,
               ),
             ),
+
+            // Center circle
             Center(
               child: Container(
                 width: 36 * widget.scale,
@@ -1043,6 +1296,7 @@ class _CircleButtonState extends State<_CircleButton> {
   }
 }
 
+/// Shoulder button (L/R)
 class _ShoulderButton extends StatefulWidget {
   final String label;
   final void Function(bool pressed) onChanged;
@@ -1119,6 +1373,7 @@ class _ShoulderButtonState extends State<_ShoulderButton> {
   }
 }
 
+/// Small button (Start/Select)
 class _SmallButton extends StatefulWidget {
   final String label;
   final void Function(bool pressed) onChanged;
@@ -1196,6 +1451,7 @@ class _SmallButtonState extends State<_SmallButton> {
   }
 }
 
+/// Joystick widget - analog-style directional input
 class _Joystick extends StatefulWidget {
   final void Function(bool up, bool down, bool left, bool right)
   onDirectionChanged;
@@ -1233,6 +1489,8 @@ class _JoystickState extends State<_Joystick> {
     final deadzone = size.width * 0.12;
 
     Offset delta = localPosition - center;
+
+    // Clamp to max radius
     final distance = delta.distance;
     if (distance > maxRadius) {
       delta = delta * (maxRadius / distance);
@@ -1241,6 +1499,8 @@ class _JoystickState extends State<_Joystick> {
     setState(() {
       _stickPosition = delta;
     });
+
+    // Calculate directions based on position
     final newUp = delta.dy < -deadzone;
     final newDown = delta.dy > deadzone;
     final newLeft = delta.dx < -deadzone;
@@ -1256,6 +1516,8 @@ class _JoystickState extends State<_Joystick> {
       _right = newRight;
       widget.onDirectionChanged(_up, _down, _left, _right);
     }
+
+    // Emit analog values (normalized to [-1.0, 1.0] then converted to [-32768, 32767])
     if (widget.onAnalogChanged != null && distance > 0) {
       final normalizedX = (delta.dx / maxRadius).clamp(-1.0, 1.0);
       final normalizedY = (-delta.dy / maxRadius).clamp(-1.0, 1.0);
@@ -1275,6 +1537,8 @@ class _JoystickState extends State<_Joystick> {
       _right = false;
       widget.onDirectionChanged(false, false, false, false);
     }
+
+    // Reset analog to center (0, 0)
     if (widget.onAnalogChanged != null) {
       widget.onAnalogChanged!(0.0, 0.0);
     }
@@ -1300,6 +1564,7 @@ class _JoystickState extends State<_Joystick> {
         child: Stack(
           alignment: Alignment.center,
           children: [
+            // Outer ring (background)
             Container(
               width: size - 8,
               height: size - 8,
@@ -1313,7 +1578,11 @@ class _JoystickState extends State<_Joystick> {
                 boxShadow: widget.skin.normalShadows,
               ),
             ),
+
+            // Direction indicators (subtle)
             ..._buildDirectionIndicators(size),
+
+            // Movable stick
             Transform.translate(
               offset: _stickPosition,
               child: Container(
@@ -1372,6 +1641,7 @@ class _JoystickState extends State<_Joystick> {
     final offset = size * 0.38;
 
     return [
+      // Up indicator
       Positioned(
         top: size / 2 - offset - indicatorSize / 2,
         left: size / 2 - indicatorSize / 2,
@@ -1382,6 +1652,7 @@ class _JoystickState extends State<_Joystick> {
           inactiveColor: widget.skin.dpadBorder.withAlpha(100),
         ),
       ),
+      // Down indicator
       Positioned(
         bottom: size / 2 - offset - indicatorSize / 2,
         left: size / 2 - indicatorSize / 2,
@@ -1392,6 +1663,7 @@ class _JoystickState extends State<_Joystick> {
           inactiveColor: widget.skin.dpadBorder.withAlpha(100),
         ),
       ),
+      // Left indicator
       Positioned(
         left: size / 2 - offset - indicatorSize / 2,
         top: size / 2 - indicatorSize / 2,
@@ -1402,6 +1674,7 @@ class _JoystickState extends State<_Joystick> {
           inactiveColor: widget.skin.dpadBorder.withAlpha(100),
         ),
       ),
+      // Right indicator
       Positioned(
         right: size / 2 - offset - indicatorSize / 2,
         top: size / 2 - indicatorSize / 2,

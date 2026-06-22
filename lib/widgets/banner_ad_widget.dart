@@ -8,6 +8,8 @@ import '../services/consent_service.dart';
 import '../services/remove_ads_purchase_service.dart';
 import '../utils/tv_detector.dart';
 
+/// Banner ad at bottom of screen. Shown on mobile only (not TV or desktop).
+/// TV uses interstitial ads instead since banner ads don't work well with D-pad.
 class BannerAdWidget extends StatefulWidget {
   const BannerAdWidget({super.key});
 
@@ -52,7 +54,9 @@ class _BannerAdWidgetState extends State<BannerAdWidget> {
     if (RemoveAdsPurchaseService.instance.adsRemoved) return false;
     if (!AdService.instance.isAvailable) return false;
     if (!Platform.isAndroid && !Platform.isIOS) return false;
+    // Disable banner ads on TV — they don't work well with D-pad navigation
     if (TvDetector.isTV) return false;
+    // Check GDPR/UMP consent status before requesting an ad
     final hasConsent = await ConsentService.instance.canRequestAds;
     return hasConsent;
   }
@@ -90,6 +94,7 @@ class _BannerAdWidgetState extends State<BannerAdWidget> {
         child: const Center(child: SizedBox.shrink()),
       );
     }
+    // Wrap in ExcludeFocus to prevent D-pad navigation from selecting the ad
     return ExcludeFocus(
       child: Container(
         alignment: Alignment.center,

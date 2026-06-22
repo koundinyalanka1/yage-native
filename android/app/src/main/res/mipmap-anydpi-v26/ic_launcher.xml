@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-    <background android:drawable="@color/launch_background"/>
+    <background android:drawable="@drawable/ic_launcher_background"/>
     <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
-    <monochrome android:drawable="@mipmap/ic_launcher_monochrome"/>
+    <!-- No <monochrome> layer on purpose: themed icons are tinted by the OS,
+         which would drop the purple/white branding. Omitting it makes devices
+         with monochrome (themed-icon) support fall back to this full-colour
+         adaptive icon — a purple background with the white controller. -->
 </adaptive-icon>

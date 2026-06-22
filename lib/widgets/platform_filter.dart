@@ -4,6 +4,7 @@ import '../core/mgba_bindings.dart';
 import '../utils/theme.dart';
 import 'tv_focusable.dart';
 
+/// Platform filter chips for game library
 class PlatformFilter extends StatelessWidget {
   final GamePlatform? selectedPlatform;
   final void Function(GamePlatform?) onChanged;
@@ -125,6 +126,34 @@ class PlatformFilter extends StatelessWidget {
             isSelected: selectedPlatform == GamePlatform.wsc,
             color: colors.wscColor,
             onTap: () => onChanged(GamePlatform.wsc),
+          ),
+          const SizedBox(width: 8),
+          _FilterChip(
+            label: 'A2600',
+            isSelected: selectedPlatform == GamePlatform.a2600,
+            color: colors.a2600Color,
+            onTap: () => onChanged(GamePlatform.a2600),
+          ),
+          const SizedBox(width: 8),
+          _FilterChip(
+            label: 'VB',
+            isSelected: selectedPlatform == GamePlatform.vb,
+            color: colors.vbColor,
+            onTap: () => onChanged(GamePlatform.vb),
+          ),
+          const SizedBox(width: 8),
+          _FilterChip(
+            label: 'TIC-80',
+            isSelected: selectedPlatform == GamePlatform.tic80,
+            color: colors.tic80Color,
+            onTap: () => onChanged(GamePlatform.tic80),
+          ),
+          const SizedBox(width: 8),
+          _FilterChip(
+            label: 'PICO-8',
+            isSelected: selectedPlatform == GamePlatform.pico8,
+            color: colors.pico8Color,
+            onTap: () => onChanged(GamePlatform.pico8),
           ),
         ],
       ),

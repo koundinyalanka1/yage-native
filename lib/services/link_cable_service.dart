@@ -3,13 +3,15 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
+/// Connection states for the link cable.
 enum LinkCableState {
   disconnected,
-  hosting,   
-  joining,   
-  connected, 
+  hosting,   // TCP server listening, waiting for peer
+  joining,   // TCP client connecting to host
+  connected, // Bidirectional link established
 }
 
+/// Message types for the link cable protocol.
 class _MsgType {
   static const int handshake    = 0x01;
   static const int handshakeAck = 0x02;
@@ -19,8 +21,20 @@ class _MsgType {
   static const int disconnect   = 0x06;
 }
 
+/// Network link cable service — enables two devices running the same ROM
+/// to exchange serial I/O data over a TCP connection, emulating the
+/// Game Boy link cable.
+///
+/// Protocol (binary over TCP):
+///   [1 byte type] [2 bytes payload length (big-endian)] [payload...]
+///
+/// Usage:
+///   1. One player calls [host] — starts a TCP server and shows their IP.
+///   2. The other player calls [join] with the host's IP.
+///   3. Once connected, the emulator frame loop calls [pollAndExchange]
+///      each frame to check for pending SIO transfers and forward data.
 class LinkCableService extends ChangeNotifier {
-  static const int defaultPort = 7269; 
+  static const int defaultPort = 7269; // "YAGE" on keypad, roughly
 
   LinkCableState _state = LinkCableState.disconnected;
   LinkCableState get state => _state;
@@ -29,22 +43,43 @@ class LinkCableService extends ChangeNotifier {
   Socket? _socket;
   String? _peerAddress;
   String? get peerAddress => _peerAddress;
+
+  // Room code for display (derived from port)
   String? _roomCode;
   String? get roomCode => _roomCode;
+
+  // ROM hash for handshake validation
   int _romHash = 0;
+
+  // Incoming data buffer
   final List<int> _recvBuffer = [];
+
+  // Pending incoming SIO byte (set when we receive sioData from peer)
   int? _pendingIncomingByte;
+
+  // Whether we already sent our outgoing byte and are waiting for a reply
   bool _awaitingReply = false;
+
+  // Latency tracking
   DateTime? _lastPingSent;
   int _latencyMs = 0;
   int get latencyMs => _latencyMs;
+
+  // Ping timer
   Timer? _pingTimer;
+
+  // Host timeout timer — auto-disconnects if no peer connects within the limit
   Timer? _hostTimeoutTimer;
   static const Duration defaultHostTimeout = Duration(minutes: 5);
+
+  // Guard against overlapping disconnect() calls
   bool _disconnecting = false;
+
+  // Error message
   String? _error;
   String? get error => _error;
 
+  /// Local IP addresses for display to the user.
   Future<List<String>> getLocalIPs() async {
     final ips = <String>[];
     try {
@@ -63,6 +98,11 @@ class LinkCableService extends ChangeNotifier {
     return ips;
   }
 
+  /// Start hosting a link cable session.
+  /// [romHash] should be a simple hash of the ROM for validation.
+  /// [timeout] controls how long the server waits for a peer before
+  /// auto-disconnecting.  Defaults to [defaultHostTimeout] (5 minutes).
+  /// Pass `null` to wait indefinitely (not recommended).
   Future<bool> host({
     required int romHash,
     int port = defaultPort,
@@ -82,6 +122,8 @@ class LinkCableService extends ChangeNotifier {
       notifyListeners();
 
       debugPrint('Link cable: hosting on port $port');
+
+      // Start host timeout — auto-disconnect if no peer connects in time
       if (timeout != null) {
         _hostTimeoutTimer?.cancel();
         _hostTimeoutTimer = Timer(timeout, () async {
@@ -92,12 +134,16 @@ class LinkCableService extends ChangeNotifier {
           }
         });
       }
+
+      // Wait for incoming connection
       _server!.listen(
         (Socket socket) {
           if (_state == LinkCableState.connected) {
+            // Already have a peer, reject
             socket.destroy();
             return;
           }
+          // Peer connected — cancel the timeout
           _hostTimeoutTimer?.cancel();
           _hostTimeoutTimer = null;
           _handleConnection(socket);
@@ -123,6 +169,7 @@ class LinkCableService extends ChangeNotifier {
     }
   }
 
+  /// Join an existing link cable session.
   Future<bool> join({
     required String hostAddress,
     required int romHash,
@@ -144,6 +191,8 @@ class LinkCableService extends ChangeNotifier {
         timeout: const Duration(seconds: 10),
       );
       _handleConnection(socket);
+
+      // Send handshake
       _sendMessage(_MsgType.handshake, _encodeHandshake());
 
       return true;
@@ -186,11 +235,12 @@ class LinkCableService extends ChangeNotifier {
   }
 
   void _processMessages() {
+    // Parse framed messages: [type:1] [len:2 big-endian] [payload:len]
     while (_recvBuffer.length >= 3) {
       final type = _recvBuffer[0];
       final len = (_recvBuffer[1] << 8) | _recvBuffer[2];
 
-      if (_recvBuffer.length < 3 + len) break; 
+      if (_recvBuffer.length < 3 + len) break; // Wait for more data
 
       final payload = _recvBuffer.sublist(3, 3 + len);
       _recvBuffer.removeRange(0, 3 + len);
@@ -235,12 +285,16 @@ class LinkCableService extends ChangeNotifier {
       await disconnect();
       return;
     }
+
+    // Version check
     final version = payload[0];
     if (version != 1) {
       _error = 'Incompatible version';
       await disconnect();
       return;
     }
+
+    // ROM hash check
     final peerHash = (payload[1] << 24) | (payload[2] << 16) |
                      (payload[3] << 8) | payload[4];
     if (peerHash != _romHash) {
@@ -248,6 +302,8 @@ class LinkCableService extends ChangeNotifier {
       await disconnect();
       return;
     }
+
+    // Send ack
     _sendMessage(_MsgType.handshakeAck, _encodeHandshake());
 
     _state = LinkCableState.connected;
@@ -279,7 +335,7 @@ class LinkCableService extends ChangeNotifier {
 
   List<int> _encodeHandshake() {
     return [
-      1, 
+      1, // version
       (_romHash >> 24) & 0xFF,
       (_romHash >> 16) & 0xFF,
       (_romHash >> 8) & 0xFF,
@@ -304,20 +360,25 @@ class LinkCableService extends ChangeNotifier {
     }
   }
 
+  /// Send an outgoing SIO byte to the peer.
   void sendSioData(int byte) {
     if (_state != LinkCableState.connected) return;
     _sendMessage(_MsgType.sioData, [byte & 0xFF]);
     _awaitingReply = true;
   }
 
+  /// Check if there is a pending incoming byte from the peer.
   bool get hasIncomingData => _pendingIncomingByte != null;
 
+  /// Consume the pending incoming byte.
+  /// Returns the byte value, or -1 if nothing pending.
   int consumeIncomingData() {
     final byte = _pendingIncomingByte;
     _pendingIncomingByte = null;
     return byte ?? -1;
   }
 
+  /// Whether we sent data and are waiting for the peer's reply.
   bool get isAwaitingReply => _awaitingReply;
 
   void _startPingTimer() {
@@ -330,6 +391,7 @@ class LinkCableService extends ChangeNotifier {
     });
   }
 
+  /// Disconnect and clean up all resources.
   Future<void> disconnect() async {
     if (_disconnecting) return;
     _disconnecting = true;
@@ -374,10 +436,18 @@ class LinkCableService extends ChangeNotifier {
     if (wasConnected) notifyListeners();
   }
 
+  /// Generate a ROM hash by streaming the **entire** file through FNV-1a.
+  /// This is NOT a cryptographic hash — just enough to verify both
+  /// players are running the same game.
+  ///
+  /// The file is read in chunks so large ROMs (up to 32 MB for GBA)
+  /// never need to be fully loaded into memory.
   static Future<int> computeRomHash(String romPath) async {
     try {
       final file = File(romPath);
       if (!file.existsSync()) return 0;
+
+      // Stream the entire file through FNV-1a
       int hash = 0x811c9dc5;
       await for (final chunk in file.openRead()) {
         for (final b in chunk) {
@@ -385,6 +455,8 @@ class LinkCableService extends ChangeNotifier {
           hash = (hash * 0x01000193) & 0xFFFFFFFF;
         }
       }
+      // Mix in file size so identical-content files of different sizes
+      // (e.g. ROM + padding) still differ.
       final size = await file.length();
       hash ^= size & 0xFFFFFFFF;
       hash = (hash * 0x01000193) & 0xFFFFFFFF;

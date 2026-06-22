@@ -7,6 +7,7 @@ import '../core/mgba_bindings.dart';
 import '../utils/tv_detector.dart';
 import '../utils/theme.dart';
 
+/// Card widget displaying a game in the library
 class GameCard extends StatelessWidget {
   final GameRom game;
   final VoidCallback onTap;
@@ -37,6 +38,13 @@ class GameCard extends StatelessWidget {
     GamePlatform.ngp => colors.ngpColor,
     GamePlatform.ws => colors.wsColor,
     GamePlatform.wsc => colors.wscColor,
+    GamePlatform.a2600 => colors.a2600Color,
+    GamePlatform.vb => colors.vbColor,
+    GamePlatform.tic80 => colors.tic80Color,
+    GamePlatform.pico8 => colors.pico8Color,
+    GamePlatform.nds => colors.ndsColor,
+    GamePlatform.ps1 => colors.ps1Color,
+    GamePlatform.intv => colors.intvColor,
     GamePlatform.unknown => colors.textMuted,
   };
 
@@ -56,6 +64,13 @@ class GameCard extends StatelessWidget {
     GamePlatform.ngp => Icons.gamepad_outlined,
     GamePlatform.ws => Icons.smartphone,
     GamePlatform.wsc => Icons.smartphone,
+    GamePlatform.a2600 => Icons.tv,
+    GamePlatform.vb => Icons.visibility,
+    GamePlatform.tic80 => Icons.code,
+    GamePlatform.pico8 => Icons.casino,
+    GamePlatform.nds => Icons.devices_other,
+    GamePlatform.ps1 => Icons.album,
+    GamePlatform.intv => Icons.dialpad,
     GamePlatform.unknown => Icons.help_outline,
   };
 
@@ -63,11 +78,13 @@ class GameCard extends StatelessWidget {
     final pColor = _platformColor(colors);
     return Stack(
       children: [
+        // Decorative pattern
         Positioned.fill(
           child: CustomPaint(
             painter: _GridPatternPainter(color: pColor.withAlpha(26)),
           ),
         ),
+        // Platform icon
         Center(
           child: Icon(_platformIcon, size: 48, color: pColor.withAlpha(204)),
         ),
@@ -120,6 +137,7 @@ class GameCard extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
+                  // Cover/Icon area — fills remaining space after info
                   Expanded(
                     child: Container(
                       decoration: BoxDecoration(
@@ -140,6 +158,7 @@ class GameCard extends StatelessWidget {
                       ),
                       child: Stack(
                         children: [
+                          // Cover image or decorative pattern
                           if (game.coverPath != null)
                             Positioned.fill(
                               child: ClipRRect(
@@ -182,6 +201,8 @@ class GameCard extends StatelessWidget {
                             )
                           else
                             _buildPlaceholder(colors),
+
+                          // Platform badge
                           Positioned(
                             top: 8,
                             right: 8,
@@ -204,6 +225,8 @@ class GameCard extends StatelessWidget {
                               ),
                             ),
                           ),
+
+                          // Favorite indicator
                           if (game.isFavorite)
                             Positioned(
                               top: 8,
@@ -218,6 +241,8 @@ class GameCard extends StatelessWidget {
                       ),
                     ),
                   ),
+
+                  // Info area — uses intrinsic height so details are never clipped
                   Padding(
                     padding: const EdgeInsets.only(
                       left: 12,
@@ -232,6 +257,7 @@ class GameCard extends StatelessWidget {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             mainAxisSize: MainAxisSize.min,
                             children: [
+                              // Title
                               Text(
                                 game.name,
                                 style: TextStyle(
@@ -244,6 +270,8 @@ class GameCard extends StatelessWidget {
                               ),
 
                               const SizedBox(height: 4),
+
+                              // Size and play time
                               Row(
                                 children: [
                                   Flexible(
@@ -286,6 +314,7 @@ class GameCard extends StatelessWidget {
                             ],
                           ),
                         ),
+                        // More options hint (hidden on TV — long-press via D-pad is the TV affordance)
                         if (onLongPress != null && !TvDetector.isTV)
                           GestureDetector(
                             onTap: onLongPress,
@@ -315,6 +344,8 @@ class GameCard extends StatelessWidget {
   }
 }
 
+/// Grid pattern painter for card background.
+/// Paint object is cached in the constructor to avoid per-frame allocation.
 class _GridPatternPainter extends CustomPainter {
   final Paint _paint;
 
@@ -339,6 +370,7 @@ class _GridPatternPainter extends CustomPainter {
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
+/// List tile variant of game card
 class GameListTile extends StatelessWidget {
   final GameRom game;
   final VoidCallback onTap;
@@ -367,6 +399,13 @@ class GameListTile extends StatelessWidget {
     GamePlatform.ngp => colors.ngpColor,
     GamePlatform.ws => colors.wsColor,
     GamePlatform.wsc => colors.wscColor,
+    GamePlatform.a2600 => colors.a2600Color,
+    GamePlatform.vb => colors.vbColor,
+    GamePlatform.tic80 => colors.tic80Color,
+    GamePlatform.pico8 => colors.pico8Color,
+    GamePlatform.nds => colors.ndsColor,
+    GamePlatform.ps1 => colors.ps1Color,
+    GamePlatform.intv => colors.intvColor,
     GamePlatform.unknown => colors.textMuted,
   };
 

@@ -7,6 +7,7 @@ import 'tv_focusable.dart';
 
 const _deviceChannel = MethodChannel('com.yourmateapps.retropal/device');
 
+/// ROM file entry from MediaStore.
 class MediaStoreRomEntry {
   final String uri;
   final String displayName;
@@ -40,11 +41,17 @@ class MediaStoreRomEntry {
       : _sizeFormatted;
 }
 
+/// MediaStore-based ROM browser for Android TV.
+///
+/// Uses MediaStore APIs (no MANAGE_EXTERNAL_STORAGE). Lists ROM files from
+/// all indexed folders (Downloads, Documents, etc.). Advises users to copy
+/// ROMs/folders to the Downloads folder for best visibility.
 class TvMediaStoreBrowser extends StatefulWidget {
   final bool allowMultiple;
 
   const TvMediaStoreBrowser({super.key, this.allowMultiple = true});
 
+  /// Show the browser as a full-screen dialog. Returns list of internal paths or null.
   static Future<List<String>?> pickFiles(
     BuildContext context, {
     bool allowMultiple = true,
@@ -155,6 +162,8 @@ class _TvMediaStoreBrowserState extends State<TvMediaStoreBrowser> {
 
   KeyEventResult _onKeyEvent(FocusNode _, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
+
+    // Confirm: gamepad Start, or Enter/Select when no child handles it
     if (event.logicalKey == LogicalKeyboardKey.gameButtonStart ||
         event.logicalKey == LogicalKeyboardKey.enter ||
         event.logicalKey == LogicalKeyboardKey.select ||
@@ -164,6 +173,8 @@ class _TvMediaStoreBrowserState extends State<TvMediaStoreBrowser> {
         return KeyEventResult.handled;
       }
     }
+
+    // Back: TV remote Back, gamepad B, Escape
     if (event.logicalKey == LogicalKeyboardKey.goBack ||
         event.logicalKey == LogicalKeyboardKey.browserBack ||
         event.logicalKey == LogicalKeyboardKey.escape ||
@@ -171,6 +182,8 @@ class _TvMediaStoreBrowserState extends State<TvMediaStoreBrowser> {
       _goBack();
       return KeyEventResult.handled;
     }
+
+    // Select All: gamepad L1, or TV remote Page Up / Channel Up / Rewind
     if (widget.allowMultiple &&
         (event.logicalKey == LogicalKeyboardKey.gameButtonLeft1 ||
             event.logicalKey == LogicalKeyboardKey.pageUp ||
@@ -184,22 +197,26 @@ class _TvMediaStoreBrowserState extends State<TvMediaStoreBrowser> {
   }
 
   IconData _romIcon(String name) {
-    final ext = p.extension(name).toLowerCase();
+    final lname = name.toLowerCase();
+    final ext = lname.endsWith('.p8.png')
+        ? '.p8.png'
+        : p.extension(name).toLowerCase();
     return switch (ext) {
       '.gba' => Icons.videogame_asset,
       '.gbc' => Icons.gamepad,
       '.gb' => Icons.sports_esports,
-      '.nes' || '.unf' || '.unif' => Icons.tv,
+      '.nes' ||
+      '.unf' ||
+      '.unif' ||
+      '.a26' ||
+      '.vb' ||
+      '.tic' ||
+      '.p8' ||
+      '.p8.png' => Icons.tv,
       '.sfc' || '.smc' => Icons.games,
       '.sms' || '.sg' => Icons.smart_display,
       '.gg' => Icons.phone_android,
-      '.md' ||
-      '.gen' ||
-      '.bin' ||
-      '.pce' ||
-      '.sgx' ||
-      '.cue' ||
-      '.chd' => Icons.album,
+      '.md' || '.gen' || '.bin' || '.pce' || '.sgx' || '.cue' => Icons.album,
       '.zip' => Icons.folder_zip,
       _ => Icons.insert_drive_file,
     };
@@ -224,12 +241,21 @@ class _TvMediaStoreBrowserState extends State<TvMediaStoreBrowser> {
         ),
         body: Column(
           children: [
+            // ── User guidance banner ──
             _buildGuidanceBanner(colors),
 
             const Divider(height: 1),
+
+            // ── Status bar ──
             if (!_loading && _error == null) _buildStatusBar(colors),
+
+            // ── Content ──
             Expanded(child: _buildBody(colors)),
+
+            // ── Action bar ──
             _buildActionBar(colors, canConfirm),
+
+            // ── Gamepad hints ──
             _buildHintBar(colors),
           ],
         ),
@@ -392,7 +418,8 @@ class _TvMediaStoreBrowserState extends State<TvMediaStoreBrowser> {
                 'Copy your ROM files to the Downloads folder first.\n\n'
                 '• Use a file manager to transfer from USB\n'
                 '• Or push files via ADB from your computer\n'
-                '• Supported: .gba, .gb, .gbc, .nes, .unf, .unif, .sfc, .sg, .bin, .pce, .sgx, .cue, .chd, .zip, etc.',
+                '• Supported: .gba, .gb, .gbc, .nes, .unf, .unif, .sfc, .sg, .bin, .pce, .sgx, .cue, .zip, etc.\n'
+                '• PS1 ZIPs can contain a .cue file with its .bin track files.',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontSize: 13,

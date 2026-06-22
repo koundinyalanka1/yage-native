@@ -12,7 +12,17 @@ $cores = @(
     @{ name = "genesis_plus_gx"; file = "genesis_plus_gx_libretro_android.so" },
     @{ name = "mupen64plus_next"; file = "mupen64plus_next_gles3_libretro_android.so" },
     @{ name = "mednafen_ngp"; file = "mednafen_ngp_libretro_android.so" },
-    @{ name = "mednafen_wswan"; file = "mednafen_wswan_libretro_android.so" }
+    @{ name = "mednafen_wswan"; file = "mednafen_wswan_libretro_android.so" },
+    @{ name = "stella2014"; file = "stella2014_libretro_android.so" },
+    @{ name = "mednafen_vb"; file = "mednafen_vb_libretro_android.so" },
+    @{ name = "tic80"; file = "tic80_libretro_android.so" },
+    @{ name = "fake08"; file = "fake08_libretro_android.so" },
+    # Nintendo DS — GPLv3, HLE BIOS via built-in FreeBIOS
+    @{ name = "melonds"; file = "melonds_libretro_android.so" },
+    # Sony PlayStation 1 (Beetle PSX HW) — GPLv2, RA-supported
+    @{ name = "mednafen_psx_hw"; file = "mednafen_psx_hw_libretro_android.so" },
+    # Mattel Intellivision — GPLv3, BIOS required
+    @{ name = "freeintv"; file = "freeintv_libretro_android.so" }
 )
 
 $jniLibs = "android\app\src\main\jniLibs"
@@ -53,6 +63,31 @@ foreach ($abi in $abis) {
 
 Write-Host "`nDone. Cores placed in $jniLibs"
 
+# ── OpenBIOS (PS1 free fallback BIOS) ───────────────────────────────
+# OpenBIOS is GPLv2 licensed and legal to bundle, but the PCSX-Redux
+# project does NOT publish a prebuilt openbios.bin — it must be built
+# from source. We surface clear instructions instead of hard-failing.
+# When the binary is staged at assets/system/openbios.bin the app will
+# auto-deploy it to the libretro system directory on first launch.
+$openBiosDir = "assets\system"
+$openBiosPath = Join-Path $openBiosDir "openbios.bin"
+if (-not (Test-Path $openBiosDir)) {
+    New-Item -ItemType Directory -Path $openBiosDir -Force | Out-Null
+}
+Write-Host ""
+if (Test-Path $openBiosPath) {
+    $size = (Get-Item $openBiosPath).Length
+    Write-Host ("OpenBIOS already staged: {0} ({1:N0} bytes)" -f $openBiosPath, $size)
+} else {
+    Write-Host "OpenBIOS (PS1 free fallback) is NOT auto-downloaded." -ForegroundColor Yellow
+    Write-Host "  To enable PS1 launches on mobile without a Sony BIOS:" -ForegroundColor Yellow
+    Write-Host "    1. git clone --recursive https://github.com/grumpycoders/pcsx-redux.git"
+    Write-Host "    2. cd pcsx-redux && ./dockermake.sh openbios     # Linux/macOS"
+    Write-Host "       or: make -C src/mips/openbios                  # if MIPS toolchain installed"
+    Write-Host "    3. Copy src/mips/openbios/openbios.bin to assets\system\openbios.bin"
+    Write-Host "  PS1 games will still work if the user uploads scph*.bin via the BIOS settings tab."
+}
+
 # ── 16 KB page-size alignment check (arm64-v8a) ─────────────────────
 Write-Host ""
 Write-Host "Checking 16 KB page-size alignment (arm64-v8a only)..."
@@ -85,8 +120,13 @@ if ($readelf) {
     }
     if ($misaligned -gt 0) {
         Write-Host ""
-        Write-Host "$misaligned library(ies) are NOT 16 KB aligned." -ForegroundColor Yellow
-        Write-Host "  These may need to be rebuilt with: -Wl,-z,max-page-size=16384"
+        Write-Host "================================================================" -ForegroundColor Red
+        Write-Host " $misaligned library(ies) are NOT 16 KB aligned." -ForegroundColor Red
+        Write-Host " Google Play requires 16 KB page alignment since Aug 2025." -ForegroundColor Red
+        Write-Host " Build these cores from source on Linux/macOS via:" -ForegroundColor Yellow
+        Write-Host "   ./scripts/build_libretro_cores.sh" -ForegroundColor Yellow
+        Write-Host " which links with -Wl,-z,max-page-size=16384 automatically." -ForegroundColor Yellow
+        Write-Host "================================================================" -ForegroundColor Red
     } else {
         Write-Host "  All libraries are 16 KB aligned!" -ForegroundColor Green
     }

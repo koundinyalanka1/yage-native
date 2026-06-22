@@ -10,6 +10,11 @@ import '../utils/tv_detector.dart';
 import '../utils/theme.dart';
 import '../widgets/tv_focusable.dart';
 
+/// Screen for managing user-entered cheat codes during gameplay.
+///
+/// Users enter their own codes (no bundled database — Play Store compliant).
+/// Cheats are persisted in SQLite and restored when the game is launched again.
+/// All cheats are free to add and toggle.
 class CheatScreen extends StatefulWidget {
   final GameRom game;
   final CheatSession session;
@@ -39,27 +44,24 @@ class _CheatScreenState extends State<CheatScreen> {
 
   void _goBack() => Navigator.of(context).pop();
 
-  CheatType _defaultCheatType() => switch (widget.game.platform) {
-    GamePlatform.gba => CheatType.gameShark,
-    GamePlatform.gb || GamePlatform.gbc => CheatType.gameShark,
-    GamePlatform.nes => CheatType.gameGenie,
-    GamePlatform.snes => CheatType.proActionReplay,
-    GamePlatform.md => CheatType.gameGenie,
-    GamePlatform.sg1000 => CheatType.raw,
-    GamePlatform.sms || GamePlatform.gg => CheatType.gameGenie,
-    _ => CheatType.raw,
-  };
+  /// Determine the default cheat type based on the game platform.
+  CheatType _defaultCheatType() => CheatType.defaultFor(widget.game.platform);
 
-  String _cheatCodeHint() => switch (widget.game.platform) {
-    GamePlatform.gba => 'e.g. 83005E18 270F',
-    GamePlatform.gb || GamePlatform.gbc => 'e.g. 01FF16D0',
-    GamePlatform.nes => 'e.g. SXIOPO',
-    GamePlatform.snes => 'e.g. 7E0DBE:63',
-    GamePlatform.md => 'e.g. RFKA-A6WR',
-    GamePlatform.sg1000 => 'Enter cheat code',
-    GamePlatform.sms || GamePlatform.gg => 'e.g. 00C-28B-E66',
-    _ => 'Enter cheat code',
-  };
+  String _cheatCodeHint([CheatType? type]) {
+    // CodeBreaker codes have a distinct 12-hex-digit layout regardless of
+    // the underlying platform, so surface that hint when it's selected.
+    if (type == CheatType.codeBreaker) return 'e.g. 3005E118 270F';
+    return switch (widget.game.platform) {
+      GamePlatform.gba => 'e.g. 83005E18 270F',
+      GamePlatform.gb || GamePlatform.gbc => 'e.g. 01FF16D0',
+      GamePlatform.nes => 'e.g. SXIOPO',
+      GamePlatform.snes => 'e.g. 7E0DBE:63',
+      GamePlatform.md => 'e.g. RFKA-A6WR',
+      GamePlatform.sg1000 => 'Enter cheat code',
+      GamePlatform.sms || GamePlatform.gg => 'e.g. 00C-28B-E66',
+      _ => 'Enter cheat code',
+    };
+  }
 
   void _showAddCheatDialog() {
     final colors = AppColorTheme.of(context);
@@ -152,7 +154,7 @@ class _CheatScreenState extends State<CheatScreen> {
                           textInputAction: TextInputAction.done,
                           decoration: InputDecoration(
                             labelText: 'Code',
-                            hintText: _cheatCodeHint(),
+                            hintText: _cheatCodeHint(selectedType),
                             border: const OutlineInputBorder(),
                             labelStyle: TextStyle(color: colors.textSecondary),
                           ),
@@ -182,38 +184,40 @@ class _CheatScreenState extends State<CheatScreen> {
                         Wrap(
                           spacing: 8,
                           runSpacing: 8,
-                          children: CheatType.values.map((type) {
-                            final isSelected = type == selectedType;
-                            return TvFocusable(
-                              borderRadius: BorderRadius.circular(8),
-                              onTap: () =>
-                                  setDialogState(() => selectedType = type),
-                              child: ChoiceChip(
-                                label: Text(
-                                  type.label,
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: isSelected
-                                        ? colors.backgroundDark
-                                        : colors.textSecondary,
-                                  ),
-                                ),
-                                selected: isSelected,
-                                selectedColor: colors.accent,
-                                backgroundColor: colors.backgroundLight,
-                                onSelected: TvDetector.isTV
-                                    ? null 
-                                    : (_) => setDialogState(
-                                        () => selectedType = type,
+                          children: CheatType.supportedFor(widget.game.platform)
+                              .map((type) {
+                                final isSelected = type == selectedType;
+                                return TvFocusable(
+                                  borderRadius: BorderRadius.circular(8),
+                                  onTap: () =>
+                                      setDialogState(() => selectedType = type),
+                                  child: ChoiceChip(
+                                    label: Text(
+                                      type.label,
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: isSelected
+                                            ? colors.backgroundDark
+                                            : colors.textSecondary,
                                       ),
-                                side: BorderSide.none,
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 8,
-                                  vertical: 4,
-                                ),
-                              ),
-                            );
-                          }).toList(),
+                                    ),
+                                    selected: isSelected,
+                                    selectedColor: colors.accent,
+                                    backgroundColor: colors.backgroundLight,
+                                    onSelected: TvDetector.isTV
+                                        ? null // On TV, TvFocusable handles selection — avoid dual-focus
+                                        : (_) => setDialogState(
+                                            () => selectedType = type,
+                                          ),
+                                    side: BorderSide.none,
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                      vertical: 4,
+                                    ),
+                                  ),
+                                );
+                              })
+                              .toList(),
                         ),
                         if (TvDetector.isTV) ...[
                           const SizedBox(height: 12),
@@ -295,6 +299,8 @@ class _CheatScreenState extends State<CheatScreen> {
     final title = titleCtrl.text.trim().isEmpty
         ? 'Cheat ${widget.session.cheats.length + 1}'
         : titleCtrl.text.trim();
+
+    // addCheat is async (DB persist) but we don't need to await it here.
     widget.session.addCheat(
       system: widget.game.platform,
       title: title,
@@ -364,8 +370,9 @@ class _CheatScreenState extends State<CheatScreen> {
       ),
     ).then((confirmed) {
       if (confirmed == true) {
-        widget.session.removeCheat(cheat.id); 
+        widget.session.removeCheat(cheat.id); // async — fire-and-forget is fine
       }
+      // Restore focus to the cheat list for D-pad navigation
       if (mounted) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) {
@@ -423,6 +430,7 @@ class _CheatScreenState extends State<CheatScreen> {
     required bool isTV,
     required bool emptyList,
   }) {
+    // "Add Code" should autofocus only when the list is empty (no rows to focus)
     final addButtonAutofocus = emptyList;
     return Container(
       padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
@@ -546,12 +554,12 @@ class _CheatScreenState extends State<CheatScreen> {
         child: ListView.separated(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           itemCount: cheats.length,
-          separatorBuilder: (_, __) => const SizedBox(height: 8),
+          separatorBuilder: (_, _) => const SizedBox(height: 8),
           itemBuilder: (context, index) {
             final cheat = cheats[index];
             return _CheatRow(
               cheat: cheat,
-              autofocus: index == 0, 
+              autofocus: index == 0, // first row gets focus when list appears
               onTap: () => _onCheatTap(cheat),
               onLongPress: () => _confirmRemoveCheat(cheat),
             );
@@ -608,6 +616,7 @@ class _CheatScreenState extends State<CheatScreen> {
   }
 }
 
+/// Individual cheat row in the list.
 class _CheatRow extends StatelessWidget {
   final Cheat cheat;
   final bool autofocus;
@@ -691,6 +700,7 @@ class _CheatRow extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 12),
+            // Status badge
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
               decoration: BoxDecoration(

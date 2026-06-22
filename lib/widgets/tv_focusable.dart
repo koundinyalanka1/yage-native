@@ -4,6 +4,11 @@ import 'package:flutter/services.dart';
 import '../utils/tv_detector.dart';
 import '../utils/theme.dart';
 
+/// Wraps any widget so it is D-pad / keyboard focusable and shows
+/// a highlight ring when focused.  Enter, Space, and Gamepad-A
+/// trigger [onTap].  Gamepad-B / Escape invoke [onBack] if provided.
+///
+/// On touchscreen-only devices this is essentially transparent.
 class TvFocusable extends StatefulWidget {
   final Widget child;
   final VoidCallback? onTap;
@@ -13,11 +18,26 @@ class TvFocusable extends StatefulWidget {
   final FocusNode? focusNode;
   final BorderRadius borderRadius;
 
+  /// Whether to animate the focus glow. When `false`, a static highlight
+  /// ring is shown instead of the pulsing glow — better for dialog buttons
+  /// where the pulse can look like a distracting blink.
   final bool animate;
 
+  /// When true, use a subtle focus ring (thinner border, lower glow) so the
+  /// focus highlight does not dominate secondary actions like Cancel.
   final bool subtleFocus;
 
+  /// Called when the focus state changes. Useful for tracking which widget
+  /// in a list/grid was last focused so focus can be restored later.
   final ValueChanged<bool>? onFocusChanged;
+
+  /// When true (default), the wrapped [child] subtree is removed from focus
+  /// traversal so that nested Material widgets (IconButton, ListTile, buttons,
+  /// InkWell, …) do not register their own competing focus nodes. Without this,
+  /// a single logical control produces two D-pad stops and two highlights on
+  /// TV. Set to false only when the child genuinely needs its own internal
+  /// focus (e.g. it contains a text field).
+  final bool excludeChildFocus;
 
   const TvFocusable({
     super.key,
@@ -31,6 +51,7 @@ class TvFocusable extends StatefulWidget {
     this.animate = true,
     this.subtleFocus = false,
     this.onFocusChanged,
+    this.excludeChildFocus = true,
   });
 
   @override
@@ -44,17 +65,21 @@ class _TvFocusableState extends State<TvFocusable>
   late final AnimationController _pulseController;
   late final Animation<double> _pulseAnimation;
 
+  /// Keys that trigger "select" / onTap
   static final _selectKeys = {
     LogicalKeyboardKey.enter,
     LogicalKeyboardKey.space,
     LogicalKeyboardKey.select,
     LogicalKeyboardKey.numpadEnter,
+    // Gamepad
     LogicalKeyboardKey.gameButtonA,
     LogicalKeyboardKey.gameButtonStart,
+    // D-Pad Centers (some remotes map to these)
     LogicalKeyboardKey.mediaPlayPause,
     LogicalKeyboardKey.mediaPlay,
   };
 
+  /// Keys that trigger "back" / onBack
   static final _backKeys = {
     LogicalKeyboardKey.escape,
     LogicalKeyboardKey.gameButtonB,
@@ -62,6 +87,13 @@ class _TvFocusableState extends State<TvFocusable>
     LogicalKeyboardKey.browserBack,
   };
 
+  /// Keys that trigger the long-press / context-menu action on TV.
+  /// Uses the keyboard context-menu key and gamepad Select (View/Back
+  /// button).  Note: gameButtonX is intentionally excluded — it is
+  /// mapped to GBA B in the gamepad mapper and would conflict in-game.
+  /// gameButtonSelect is safe here because TvFocusable widgets are only
+  /// focused outside gameplay (home screen, menus) where GBA Select is
+  /// not needed.
   static final _contextKeys = {
     LogicalKeyboardKey.gameButtonSelect,
     LogicalKeyboardKey.contextMenu,
@@ -130,43 +162,72 @@ class _TvFocusableState extends State<TvFocusable>
       child: GestureDetector(
         onTap: widget.onTap,
         onLongPress: widget.onLongPress,
-        child: AnimatedBuilder(
-          animation: _pulseAnimation,
-          builder: (context, child) {
-            const borderWidth = 2.5;
-            final focusBorderColor = colors.accent.withAlpha(widget.subtleFocus ? 80 : 255);
-            return AnimatedScale(
-              scale: _focused ? 1.04 : 1.0,
-              duration: const Duration(milliseconds: 150),
-              curve: Curves.easeOut,
-              child: AnimatedContainer(
+        // The Focus node above is the single focus owner for this control, so
+        // exclude the child subtree from focus traversal. This stops nested
+        // Material widgets from adding a second D-pad stop / duplicate
+        // highlight on the same control (see [excludeChildFocus]).
+        child: ExcludeFocus(
+          excluding: widget.excludeChildFocus,
+          child: AnimatedBuilder(
+            animation: _pulseAnimation,
+            builder: (context, child) {
+              const borderWidth = 2.5;
+              // Pulse drives a soft focus glow so the highlight reads clearly
+              // from across a room (10-foot UI). 1.0 when not animating.
+              final pulse = widget.animate ? _pulseAnimation.value : 1.0;
+              final showGlow = widget.animate && !widget.subtleFocus;
+              final focusBorderColor =
+                  colors.accent.withAlpha(widget.subtleFocus ? 80 : 255);
+              return AnimatedScale(
+                scale: _focused ? 1.04 : 1.0,
                 duration: const Duration(milliseconds: 150),
-                decoration: _focused
-                    ? BoxDecoration(
-                        borderRadius: widget.borderRadius,
-                        border: Border.all(
-                          color: focusBorderColor,
-                          width: borderWidth,
+                curve: Curves.easeOut,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 150),
+                  decoration: _focused
+                      ? BoxDecoration(
+                          borderRadius: widget.borderRadius,
+                          border: Border.all(
+                            color: focusBorderColor,
+                            width: borderWidth,
+                          ),
+                          boxShadow: showGlow
+                              ? [
+                                  BoxShadow(
+                                    color: colors.accent
+                                        .withAlpha((70 * pulse).round()),
+                                    blurRadius: 6 + 10 * pulse,
+                                    spreadRadius: 1 + 1.5 * pulse,
+                                  ),
+                                ]
+                              : null,
+                        )
+                      : BoxDecoration(
+                          borderRadius: widget.borderRadius,
+                          border: Border.all(
+                            color: Colors.transparent,
+                            width: borderWidth,
+                          ),
                         ),
-                      )
-                    : BoxDecoration(
-                        borderRadius: widget.borderRadius,
-                        border: Border.all(
-                          color: Colors.transparent,
-                          width: borderWidth,
-                        ),
-                      ),
-                child: child,
-              ),
-            );
-          },
-          child: widget.child,
+                  child: child,
+                ),
+              );
+            },
+            child: widget.child,
+          ),
         ),
       ),
     );
   }
 }
 
+/// Wraps a scrollable list / grid to provide D-pad hold-to-scroll
+/// acceleration.  When a directional key is held down, focus traversal
+/// progressively speeds up — instead of moving one item per key repeat,
+/// it skips multiple items, making navigation through 50+ item lists viable.
+///
+/// On devices without a D-pad / gamepad this is effectively a no-op (the
+/// Focus node never receives key-repeat events for directional keys).
 class TvScrollAccelerator extends StatefulWidget {
   final Widget child;
 
@@ -186,11 +247,15 @@ class _TvScrollAcceleratorState extends State<TvScrollAccelerator> {
     LogicalKeyboardKey.arrowRight: TraversalDirection.right,
   };
 
+  /// Progressive acceleration curve.
+  /// Returns the number of **extra** focus steps to perform on top of
+  /// the default one-item-per-repeat that Flutter's shortcut system
+  /// already handles.
   int _extraSteps(int repeat) {
-    if (repeat < 5) return 0; 
-    if (repeat < 12) return 1; 
-    if (repeat < 25) return 3; 
-    return 7; 
+    if (repeat < 5) return 0; //  1× — normal one-at-a-time
+    if (repeat < 12) return 1; // 2×
+    if (repeat < 25) return 3; // 4×
+    return 7; //                  8×
   }
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
@@ -201,6 +266,9 @@ class _TvScrollAcceleratorState extends State<TvScrollAccelerator> {
       _repeatCount++;
       final extra = _extraSteps(_repeatCount);
       if (extra > 0) {
+        // Programmatically move focus by [extra] additional items.
+        // focusInDirection is synchronous and updates primaryFocus
+        // immediately, so sequential calls are safe.
         for (int i = 0; i < extra; i++) {
           primaryFocus?.focusInDirection(dir);
         }
@@ -210,6 +278,9 @@ class _TvScrollAcceleratorState extends State<TvScrollAccelerator> {
     } else if (event is KeyUpEvent) {
       _repeatCount = 0;
     }
+
+    // Always return ignored so the framework's own directional-focus
+    // shortcut still fires and moves focus by its normal +1 step.
     return KeyEventResult.ignored;
   }
 
@@ -217,59 +288,10 @@ class _TvScrollAcceleratorState extends State<TvScrollAccelerator> {
   Widget build(BuildContext context) {
     return Focus(
       onKeyEvent: _onKey,
-      canRequestFocus: false, 
+      canRequestFocus: false, // invisible to focus traversal
       skipTraversal: true,
       child: widget.child,
     );
   }
 }
 
-class AnimatedBuilder extends StatelessWidget {
-  final Animation<double> animation;
-  final Widget Function(BuildContext context, Widget? child) builder;
-  final Widget? child;
-
-  const AnimatedBuilder({
-    super.key,
-    required this.animation,
-    required this.builder,
-    this.child,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder._internal(
-      animation: animation,
-      builder: builder,
-      child: child,
-    );
-  }
-
-  static Widget _internal({
-    required Animation<double> animation,
-    required Widget Function(BuildContext, Widget?) builder,
-    Widget? child,
-  }) {
-    return _AnimatedBuilderWidget(
-      animation: animation,
-      builder: builder,
-      child: child,
-    );
-  }
-}
-
-class _AnimatedBuilderWidget extends AnimatedWidget {
-  final Widget Function(BuildContext, Widget?) builder;
-  final Widget? child;
-
-  const _AnimatedBuilderWidget({
-    required Animation<double> animation,
-    required this.builder,
-    this.child,
-  }) : super(listenable: animation);
-
-  @override
-  Widget build(BuildContext context) {
-    return builder(context, child);
-  }
-}

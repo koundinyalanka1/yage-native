@@ -6,6 +6,15 @@ import '../models/ra_achievement.dart';
 import '../utils/theme.dart';
 import '../widgets/tv_focusable.dart';
 
+/// Full-screen dialog/page showing all achievements for the current game.
+///
+/// Displays achievements in a scrollable list grouped by status:
+///   • Earned (hardcore) — gold accent
+///   • Earned (softcore) — green accent
+///   • Locked — greyed out
+///
+/// Each item shows the badge image, title, description, points, and
+/// an earned date if applicable.
 class AchievementsScreen extends StatefulWidget {
   final RAGameData gameData;
   final bool isHardcore;
@@ -119,6 +128,7 @@ class _AchievementsScreenState extends State<AchievementsScreen>
           policy: OrderedTraversalPolicy(),
           child: Column(
             children: [
+              // ── Progress bar + Tab bar ──
               FocusTraversalOrder(
                 order: const NumericFocusOrder(0),
                 child: Material(
@@ -173,6 +183,7 @@ class _AchievementsScreenState extends State<AchievementsScreen>
                   ),
                 ),
               ),
+              // ── Tab content ──
               Expanded(
                 child: FocusTraversalOrder(
                   order: const NumericFocusOrder(1),
@@ -218,7 +229,7 @@ class _AchievementsScreenState extends State<AchievementsScreen>
     return ListView.separated(
       padding: const EdgeInsets.all(12),
       itemCount: achievements.length,
-      separatorBuilder: (_, __) => const SizedBox(height: 8),
+      separatorBuilder: (_, _) => const SizedBox(height: 8),
       itemBuilder: (context, index) {
         final ach = achievements[index];
         return TvFocusable(
@@ -234,6 +245,7 @@ class _AchievementsScreenState extends State<AchievementsScreen>
   }
 }
 
+/// A single achievement tile in the list.
 class _AchievementTile extends StatelessWidget {
   final RAAchievement achievement;
   final bool isHardcoreMode;
@@ -276,6 +288,7 @@ class _AchievementTile extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Badge image
           ClipRRect(
             borderRadius: BorderRadius.circular(10),
             child: SizedBox(
@@ -288,7 +301,7 @@ class _AchievementTile extends StatelessWidget {
                 width: 48,
                 height: 48,
                 fit: BoxFit.cover,
-                placeholder: (_, __) => Container(
+                placeholder: (_, _) => Container(
                   color: colors.backgroundLight,
                   child: const Center(
                     child: SizedBox(
@@ -312,10 +325,13 @@ class _AchievementTile extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 12),
+
+          // Text content
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // Title row
                 Row(
                   children: [
                     Expanded(
@@ -333,6 +349,7 @@ class _AchievementTile extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(width: 8),
+                    // Points badge
                     Container(
                       padding: const EdgeInsets.symmetric(
                         horizontal: 6,
@@ -360,6 +377,8 @@ class _AchievementTile extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 4),
+
+                // Description
                 Text(
                   achievement.description,
                   style: TextStyle(
@@ -369,10 +388,13 @@ class _AchievementTile extends StatelessWidget {
                   maxLines: 3,
                   overflow: TextOverflow.ellipsis,
                 ),
+
+                // Type tag + earned date
                 if (achievement.type != null || _dateEarned != null) ...[
                   const SizedBox(height: 6),
                   Row(
                     children: [
+                      // Type tag
                       if (achievement.type != null)
                         Container(
                           padding: const EdgeInsets.symmetric(
@@ -398,6 +420,8 @@ class _AchievementTile extends StatelessWidget {
                             ),
                           ),
                         ),
+
+                      // Hardcore / softcore badge
                       if (_isEarned) ...[
                         if (achievement.type != null) const SizedBox(width: 6),
                         Container(
@@ -427,6 +451,8 @@ class _AchievementTile extends StatelessWidget {
                       ],
 
                       const Spacer(),
+
+                      // Earned date
                       if (_dateEarned != null)
                         Text(
                           _formatDate(_dateEarned!),
@@ -438,6 +464,8 @@ class _AchievementTile extends StatelessWidget {
                     ],
                   ),
                 ],
+
+                // Rarity info
                 if (achievement.numAwarded > 0) ...[
                   const SizedBox(height: 4),
                   Text(

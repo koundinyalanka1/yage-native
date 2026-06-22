@@ -5,6 +5,7 @@ import 'package:in_app_purchase/in_app_purchase.dart';
 import 'package:in_app_purchase_android/in_app_purchase_android.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+/// Handles the one-time non-consumable purchase that removes ads.
 class RemoveAdsPurchaseService extends ChangeNotifier {
   RemoveAdsPurchaseService._();
 
@@ -61,6 +62,9 @@ class RemoveAdsPurchaseService extends ChangeNotifier {
     debugPrint('[IAP] store available: $_storeAvailable');
     if (_storeAvailable) {
       await _queryProductDetails();
+      // Auto-restore: check for existing purchases (e.g. bought on phone,
+      // launching on TV for the first time). The purchase stream listener
+      // will grant the entitlement if a valid purchase is found.
       if (!_adsRemoved) {
         debugPrint('[IAP] no cached entitlement — auto-restoring purchases');
         try {
@@ -81,6 +85,74 @@ class RemoveAdsPurchaseService extends ChangeNotifier {
     notifyListeners();
     debugPrint(
       '[IAP] initialize() done — product: ${_removeAdsProduct?.id}, error: $_errorMessage',
+    );
+  }
+
+  /// Load only the **cached** entitlement flag from [SharedPreferences].
+  ///
+  /// Safe to call before the first frame because it touches no network
+  /// — it just reads a bool. The home screen uses [adsRemoved] to decide
+  /// whether to show banner ads, so this must complete on the splash
+  /// path. The expensive Play-Billing initialization (store availability,
+  /// product details, restorePurchases) is deferred to
+  /// [initializeStoreInBackground].
+  Future<void> loadCachedEntitlementOnly() async {
+    await _loadCachedEntitlement();
+    debugPrint('[IAP] fast-path entitlement: adsRemoved=$_adsRemoved');
+  }
+
+  /// Complete the Play-Billing side of initialization. This does all the
+  /// network/IPC work (`isAvailable`, `queryProductDetails`,
+  /// `restorePurchases`) that was previously in [initialize] and would
+  /// block the splash screen on slow connections.
+  ///
+  /// Idempotent — safe to call multiple times. Fire-and-forget from
+  /// [SplashScreen] immediately after the home route is pushed.
+  Future<void> initializeStoreInBackground() async {
+    if (_initialized) return;
+
+    // Cached entitlement may already be loaded via [loadCachedEntitlementOnly];
+    // call here too so this method is self-contained and idempotent.
+    await _loadCachedEntitlement();
+
+    _purchaseSub = _inAppPurchase.purchaseStream.listen(
+      _onPurchaseUpdated,
+      onError: (Object error) {
+        debugPrint('[IAP] purchase stream error: $error');
+        _errorMessage = 'Purchase stream error: $error';
+        _isPurchasing = false;
+        notifyListeners();
+      },
+    );
+
+    try {
+      _storeAvailable = await _inAppPurchase.isAvailable();
+    } catch (e) {
+      _storeAvailable = false;
+      debugPrint('[IAP] isAvailable() failed in background: $e');
+    }
+    debugPrint('[IAP] (bg) store available: $_storeAvailable');
+
+    if (_storeAvailable) {
+      await _queryProductDetails();
+      if (!_adsRemoved) {
+        debugPrint('[IAP] (bg) no cached entitlement — auto-restoring');
+        try {
+          await _inAppPurchase.restorePurchases();
+        } catch (e) {
+          debugPrint('[IAP] (bg) auto-restore failed: $e');
+        }
+      }
+    } else if (!_adsRemoved) {
+      _errorMessage = 'Store is currently unavailable.';
+    }
+
+    _initialized = true;
+    _isLoading = false;
+    notifyListeners();
+    debugPrint(
+      '[IAP] (bg) initialize done — product: ${_removeAdsProduct?.id}, '
+      'error: $_errorMessage',
     );
   }
 
@@ -111,6 +183,18 @@ class RemoveAdsPurchaseService extends ChangeNotifier {
     _isPurchasing = true;
     notifyListeners();
 
+    // Always re-query product details before purchase to get a fresh offer
+    // token. Billing Library 6+ requires a valid offer token for
+    // launchBillingFlow — a stale/null token causes INVALID_OFFER_TOKEN.
+    await _queryProductDetails();
+    if (_removeAdsProduct == null) {
+      debugPrint('[IAP] product null after re-query — cannot purchase');
+      _isPurchasing = false;
+      _errorMessage = 'Unable to load product details. Please try again.';
+      notifyListeners();
+      return false;
+    }
+
     final productDetails = _removeAdsProduct!;
     debugPrint(
       '[IAP] product type: ${productDetails.runtimeType}, price: ${productDetails.price}',
@@ -125,9 +209,18 @@ class RemoveAdsPurchaseService extends ChangeNotifier {
     }
 
     debugPrint('[IAP] calling buyNonConsumable...');
-    final started = await _inAppPurchase.buyNonConsumable(
-      purchaseParam: purchaseParam,
-    );
+    bool started = false;
+    try {
+      started = await _inAppPurchase.buyNonConsumable(
+        purchaseParam: purchaseParam,
+      );
+    } catch (e) {
+      debugPrint('[IAP] buyNonConsumable threw: $e');
+      _isPurchasing = false;
+      _errorMessage = 'Unable to start purchase flow. Please try again.';
+      notifyListeners();
+      return false;
+    }
     debugPrint('[IAP] buyNonConsumable returned: $started');
 
     if (!started) {
@@ -209,6 +302,9 @@ class RemoveAdsPurchaseService extends ChangeNotifier {
             debugPrint(
               '[IAP] status=error code=${purchase.error?.code} msg=${purchase.error?.message} details=${purchase.error?.details}',
             );
+            // Google Play returns an error with "already owned" when the
+            // user purchased on another device (e.g. phone → TV).  Treat
+            // it as a pending restore instead of showing an error.
             final errMsg = purchase.error?.message.toLowerCase() ?? '';
             final errDetails =
                 purchase.error?.details.toString().toLowerCase() ?? '';

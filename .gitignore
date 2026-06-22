@@ -51,8 +51,9 @@ android/*.jks
 android/*.keystore
 android/app/google-services.json
 
-# Pre-built native libraries
-android/app/src/main/jniLibs/
+# Pre-built libretro core binaries (jniLibs) ARE included in this source
+# release so the app can be built and run as-is. Cores are third-party
+# libretro libraries; see README for upstream sources and licenses.
 
 # Native build artifacts
 native/build-arm64/

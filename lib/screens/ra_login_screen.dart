@@ -6,6 +6,7 @@ import '../utils/theme.dart';
 import '../utils/tv_detector.dart';
 import '../widgets/tv_focusable.dart';
 
+/// Screen for logging into RetroAchievements with username + password.
 class RALoginScreen extends StatefulWidget {
   const RALoginScreen({super.key});
 
@@ -77,14 +78,14 @@ class _RALoginScreenState extends State<RALoginScreen> {
     if (result.success) {
       if (!mounted) return;
       Navigator.pop(context, true);
-      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
-        SnackBar(
-          content: Text(
-            'Welcome, ${result.profile?.username ?? 'Player'}!',
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(
+          SnackBar(
+            content: Text('Welcome, ${result.profile?.username ?? 'Player'}!'),
+            duration: const Duration(seconds: 3),
           ),
-          duration: const Duration(seconds: 3),
-        ),
-      );
+        );
     } else {
       setState(() {
         _isSubmitting = false;
@@ -115,6 +116,7 @@ class _RALoginScreenState extends State<RALoginScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              // ── Header / logo area ──
               const SizedBox(height: 8),
               Center(
                 child: Container(
@@ -166,6 +168,8 @@ class _RALoginScreenState extends State<RALoginScreen> {
                 ),
               ),
               const SizedBox(height: 32),
+
+              // ── Username field ──
               TextFormField(
                 controller: _usernameController,
                 focusNode: _usernameFocusNode,
@@ -175,10 +179,7 @@ class _RALoginScreenState extends State<RALoginScreen> {
                 decoration: InputDecoration(
                   labelText: 'Username',
                   hintText: 'Your RetroAchievements username',
-                  prefixIcon: Icon(
-                    Icons.person_outline,
-                    color: colors.accent,
-                  ),
+                  prefixIcon: Icon(Icons.person_outline, color: colors.accent),
                 ),
                 validator: (value) {
                   if (value == null || value.trim().isEmpty) {
@@ -188,6 +189,8 @@ class _RALoginScreenState extends State<RALoginScreen> {
                 },
               ),
               const SizedBox(height: 16),
+
+              // ── Password field ──
               TextFormField(
                 controller: _passwordController,
                 enabled: !_isSubmitting,
@@ -197,10 +200,7 @@ class _RALoginScreenState extends State<RALoginScreen> {
                 decoration: InputDecoration(
                   labelText: 'Password',
                   hintText: 'Your RetroAchievements password',
-                  prefixIcon: Icon(
-                    Icons.lock_outline,
-                    color: colors.accent,
-                  ),
+                  prefixIcon: Icon(Icons.lock_outline, color: colors.accent),
                   suffixIcon: TvFocusable(
                     onTap: () {
                       setState(() => _obscurePassword = !_obscurePassword);
@@ -227,30 +227,25 @@ class _RALoginScreenState extends State<RALoginScreen> {
                 },
               ),
               const SizedBox(height: 12),
+
+              // ── Helper text ──
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
                   color: colors.backgroundLight,
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: colors.surfaceLight,
-                    width: 1,
-                  ),
+                  border: Border.all(color: colors.surfaceLight, width: 1),
                 ),
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Icon(
-                      Icons.info_outline,
-                      size: 18,
-                      color: colors.accent,
-                    ),
+                    Icon(Icons.info_outline, size: 18, color: colors.accent),
                     const SizedBox(width: 10),
                     Expanded(
                       child: Text(
                         'Use your retroachievements.org credentials.\n'
                         'Your password is stored securely on-device\n'
-                        'and never sent to any third party.',
+                        'and shared only with retroachievements.org.',
                         style: TextStyle(
                           fontSize: 12,
                           color: colors.textSecondary,
@@ -262,6 +257,8 @@ class _RALoginScreenState extends State<RALoginScreen> {
                 ),
               ),
               const SizedBox(height: 24),
+
+              // ── Error message ──
               if (_errorMessage != null) ...[
                 Container(
                   padding: const EdgeInsets.all(12),
@@ -276,11 +273,7 @@ class _RALoginScreenState extends State<RALoginScreen> {
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Icon(
-                        Icons.error_outline,
-                        size: 20,
-                        color: colors.error,
-                      ),
+                      Icon(Icons.error_outline, size: 20, color: colors.error),
                       const SizedBox(width: 10),
                       Expanded(
                         child: Text(
@@ -297,6 +290,8 @@ class _RALoginScreenState extends State<RALoginScreen> {
                 ),
                 const SizedBox(height: 16),
               ],
+
+              // ── Submit button ──
               TvFocusable(
                 onTap: _isSubmitting ? null : _submit,
                 borderRadius: BorderRadius.circular(14),

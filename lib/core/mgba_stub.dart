@@ -3,6 +3,8 @@ import 'dart:typed_data';
 import '../models/game_rom.dart';
 import 'mgba_bindings.dart';
 
+/// Stub implementation of mGBA core for testing UI without native library
+/// This simulates the emulator interface with fake data
 class MGBAStub {
   bool _isRunning = false;
   int _width = 240;
@@ -16,9 +18,12 @@ class MGBAStub {
   int get height => _height;
   GamePlatform get platform => _platform;
 
+  /// Initialize (always succeeds in stub)
   bool initialize() => true;
 
+  /// Load a ROM file (simulates loading)
   bool loadROM(String path) {
+    // Detect platform from extension
     if (path.endsWith('.gb')) {
       _platform = GamePlatform.gb;
       _width = 160;
@@ -93,22 +98,33 @@ class MGBAStub {
     _currentKeys &= ~key;
   }
 
+  /// Generate a test pattern based on input state
   Uint8List? getVideoBuffer() {
     if (!_isRunning) return null;
 
     final pixels = Uint8List(_width * _height * 4);
+    
+    // Create an animated gradient pattern
     final time = _frameCount / 60.0;
     
     for (int y = 0; y < _height; y++) {
       for (int x = 0; x < _width; x++) {
         final i = (y * _width + x) * 4;
+        
+        // Base gradient
         final nx = x / _width;
         final ny = y / _height;
+        
+        // Animate based on frame count
         final wave = (sin((nx + time) * 3.14159 * 2) + 1) / 2;
         final wave2 = (sin((ny + time * 0.7) * 3.14159 * 2) + 1) / 2;
+        
+        // Show input visualization
         int r = ((wave * 100) + 50).toInt();
         int g = ((wave2 * 80) + 30).toInt();
         int b = ((nx * ny * 150) + 50).toInt();
+        
+        // Highlight based on key presses
         if (_currentKeys & GBAKey.up != 0 && y < _height ~/ 4) {
           g = 255;
         }
@@ -139,27 +155,40 @@ class MGBAStub {
   }
 
   (Int16List?, int) getAudioBuffer() {
+    // Return silence
     return (null, 0);
   }
 
   bool saveState(int slot) => true;
   bool loadState(int slot) => true;
+  
+  // SRAM stubs (no-op in demo mode)
   int getSramSize() => 0;
   bool saveSram(String path) => true;
   bool loadSram(String path) => true;
+
+  // Audio volume stubs
   void setVolume(double volume) {}
   void setAudioEnabled(bool enabled) {}
+
+  // Color palette stub
   void setColorPalette(int paletteIndex, List<int> colors) {}
+
+  // Rewind stubs
   int rewindInit(int capacity) => 0;
   void rewindDeinit() {}
   int rewindPush() => 0;
-  int rewindPop() => -1; 
+  int rewindPop() => -1; // No states available in stub
   int rewindCount() => 0;
+
+  // Link cable stubs
   bool get isLinkSupported => false;
   int linkReadByte(int addr) => -1;
   int linkWriteByte(int addr, int value) => -1;
   int linkGetTransferStatus() => -1;
   int linkExchangeData(int incoming) => -1;
+
+  // Memory read stubs (for RetroAchievements — no-op in demo mode)
   bool get isMemoryReadSupported => false;
   int readByte(int address) => 0;
   int getMemorySize(int regionId) => 0;
@@ -174,8 +203,11 @@ class MGBAStub {
 }
 
 double sin(double x) {
+  // Simple sine approximation
   x = x % (3.14159 * 2);
   if (x < 0) x += 3.14159 * 2;
+  
+  // Taylor series approximation
   double result = x;
   double term = x;
   for (int i = 1; i < 10; i++) {

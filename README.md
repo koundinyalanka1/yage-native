@@ -4,8 +4,9 @@ RetroPal is a multi-system retro game emulator for Android, built with
 Flutter and a custom native libretro frontend written in C.
 
 Supported platforms: Game Boy, Game Boy Color, Game Boy Advance, NES, SNES,
-Mega Drive / Genesis, Neo Geo Pocket, WonderSwan, PC Engine, SuperGrafx, and
-Nintendo 64.
+Master System, Game Gear, SG-1000, Mega Drive / Genesis, PC Engine, SuperGrafx,
+Neo Geo Pocket, WonderSwan, Nintendo 64, Nintendo DS, PlayStation, Atari 2600,
+Virtual Boy, Intellivision, TIC-80, and PICO-8.
 
 ## Building
 
@@ -17,8 +18,10 @@ Nintendo 64.
 
 ### Libretro Cores
 
-The emulator cores are not included in this repository. Build them from
-source or fetch pre-built binaries:
+Pre-built libretro core binaries are bundled in
+`android/app/src/main/jniLibs/` so the app builds and runs as-is. Each core is
+a third-party libretro library; see the Licenses section below for upstream
+sources. To rebuild the cores from source (or refresh them):
 
 ```bash
 # Build from source (recommended)
@@ -27,8 +30,6 @@ source or fetch pre-built binaries:
 # Or fetch pre-built from libretro buildbot
 ./scripts/fetch_libretro_cores.sh
 ```
-
-Built cores are placed in `android/app/src/main/jniLibs/`.
 
 ### App
 
@@ -74,12 +75,19 @@ See [LICENSE](LICENSE) for the full text.
 - **mGBA** (GB/GBC/GBA) — Mozilla Public License 2.0 — https://mgba.io
 - **FCEUmm** (NES) — GNU GPL v2 — https://github.com/libretro/libretro-fceumm
 - **Snes9x 2010** (SNES) — Non-commercial — https://www.snes9x.com
-- **Genesis Plus GX** (Mega Drive) — Non-commercial — https://github.com/ekeeke/Genesis-Plus-GX
+- **Genesis Plus GX** (Mega Drive / Master System / Game Gear / SG-1000) — Non-commercial — https://github.com/ekeeke/Genesis-Plus-GX
 - **Mupen64Plus-Next** (N64) — GNU GPL v2+ — https://github.com/libretro/mupen64plus-libretro-nx
 - **Mednafen/Beetle NGP** (Neo Geo Pocket) — GNU GPL v2 — https://github.com/libretro/beetle-ngp-libretro
 - **Mednafen/Beetle WonderSwan** — GNU GPL v2 — https://github.com/libretro/beetle-wswan-libretro
 - **Mednafen/Beetle PCE Fast** (PC Engine) — GNU GPL v2 — https://github.com/libretro/beetle-pce-fast-libretro
 - **Mednafen/Beetle SuperGrafx** — GNU GPL v2 — https://github.com/libretro/beetle-supergrafx-libretro
+- **melonDS** (Nintendo DS) — GNU GPL v3 — https://github.com/koundinyalanka1/melonDS
+- **Beetle PSX HW** (PlayStation) — GNU GPL v2 — https://github.com/libretro/beetle-psx-libretro
+- **FreeIntv** (Intellivision) — GNU GPL v2 — https://github.com/libretro/FreeIntv
+- **Stella 2014** (Atari 2600) — GNU GPL v2 — https://github.com/libretro/stella2014-libretro
+- **Beetle VB** (Virtual Boy) — GNU GPL v2 — https://github.com/libretro/beetle-vb-libretro
+- **TIC-80** (fantasy console) — MIT License — https://github.com/nesbox/TIC-80
+- **FAKE-08** (PICO-8) — MIT License — https://github.com/jtothebell/fake-08
 
 ### Static Dependencies
 

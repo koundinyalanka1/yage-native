@@ -9,7 +9,16 @@ import '../utils/tv_detector.dart';
 
 const _deviceChannel = MethodChannel('com.yourmateapps.retropal/device');
 
+/// Service for ROM folder setup: pick folder, import from folder, sync saves.
+///
+/// On Android: uses SAF (Storage Access Framework) for persistent folder access.
+/// On TV: uses HTTP upload (handled separately in UI, this service returns null).
+/// On desktop/other: uses FilePicker.getDirectoryPath.
 class RomFolderService {
+  /// Returns true only when the configured folder value is actually usable.
+  ///
+  /// - Android SAF URI (`content://`): requires persisted URI permission.
+  /// - Direct path: directory must exist.
   static Future<bool> hasUsableFolder(String? folderUriOrPath) async {
     if (folderUriOrPath == null) return false;
     final value = folderUriOrPath.trim();
@@ -36,7 +45,10 @@ class RomFolderService {
     }
   }
 
+  /// Pick a ROMs folder. Returns URI (Android SAF) or path (other platforms).
+  /// Returns null if user cancels or on TV (TV uses HTTP upload).
   static Future<String?> pickFolder(dynamic context) async {
+    // TV uses HTTP upload dialog instead - handled at UI layer
     if (TvDetector.isTV) {
       return null;
     }
@@ -52,13 +64,17 @@ class RomFolderService {
     }
 
     try {
-      return await FilePicker.platform.getDirectoryPath();
+      return await FilePicker.getDirectoryPath();
     } catch (e) {
       debugPrint('RomFolderService: getDirectoryPath failed — $e');
       return null;
     }
   }
 
+  /// Import ROMs and saves from the given folder URI/path into internal storage.
+  /// On Android with SAF URI: uses native import.
+  /// With direct path: scans directory and copies files.
+  /// Returns list of internal ROM paths that were imported.
   static Future<List<String>> importFromFolder(String folderUriOrPath) async {
     if (Platform.isAndroid && folderUriOrPath.startsWith('content://')) {
       try {
@@ -72,9 +88,17 @@ class RomFolderService {
         return [];
       }
     }
+
+    // Direct path (TV, desktop, or legacy Android)
+    // GameLibraryService.addRomDirectory + scanDirectory handles this
     return [];
   }
 
+  /// Copy a save file from the user's folder to internal storage.
+  /// Used before loading a game: import .sav from user folder if it exists.
+  /// On Android with SAF URI: uses native copy.
+  /// With direct path: uses Dart File.copy.
+  /// Returns true if successful.
   static Future<bool> copySaveFromUserFolder(
     String folderUriOrPath,
     String fileName,
@@ -96,6 +120,8 @@ class RomFolderService {
         return false;
       }
     }
+
+    // Direct path: copy file from folder
     try {
       final sourceFile = File(p.join(folderUriOrPath, fileName));
       if (!await sourceFile.exists()) return false;
@@ -107,6 +133,10 @@ class RomFolderService {
     }
   }
 
+  /// Copy a save file from internal storage to the user's folder.
+  /// On Android with SAF URI: uses native copy.
+  /// With direct path: uses Dart File.copy.
+  /// Returns true if successful.
   static Future<bool> copySaveToUserFolder(
     String folderUriOrPath,
     String sourceFilePath,
@@ -123,6 +153,8 @@ class RomFolderService {
         return false;
       }
     }
+
+    // Direct path: copy file to folder
     try {
       final destDir = Directory(folderUriOrPath);
       if (!await destDir.exists()) {
@@ -141,5 +173,6 @@ class RomFolderService {
     }
   }
 
+  /// Check if the platform supports the ROM folder feature (pick + sync).
   static bool get isSupported => true;
 }

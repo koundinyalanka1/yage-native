@@ -1,23 +1,44 @@
 import 'package:flutter/material.dart';
 
+/// Defines a complete app color theme as a [ThemeExtension].
+///
+/// Access the current theme in any widget via [AppColorTheme.of]:
+/// ```dart
+/// final colors = AppColorTheme.of(context);
+/// Container(color: colors.primary);
+/// ```
+///
+/// Because it's stored inside [ThemeData.extensions], any widget that calls
+/// [AppColorTheme.of] (which uses [Theme.of]) will automatically rebuild
+/// when the theme changes — no static mutable state needed.
 class AppColorTheme extends ThemeExtension<AppColorTheme> {
   final String id;
   final String name;
   final String emoji;
+
+  // Primary colors
   final Color primary;
   final Color primaryDark;
   final Color primaryLight;
+
+  // Accent colors
   final Color accent;
   final Color accentAlt;
   final Color accentYellow;
+
+  // Background colors
   final Color backgroundDark;
   final Color backgroundMedium;
   final Color backgroundLight;
   final Color surface;
   final Color surfaceLight;
+
+  // Text colors
   final Color textPrimary;
   final Color textSecondary;
   final Color textMuted;
+
+  // Platform colors
   final Color gbColor;
   final Color gbcColor;
   final Color gbaColor;
@@ -29,6 +50,15 @@ class AppColorTheme extends ThemeExtension<AppColorTheme> {
   final Color ngpColor;
   final Color wsColor;
   final Color wscColor;
+  final Color a2600Color;
+  final Color vbColor;
+  final Color tic80Color;
+  final Color pico8Color;
+  final Color ndsColor;
+  final Color ps1Color;
+  final Color intvColor;
+
+  // State colors
   final Color success;
   final Color warning;
   final Color error;
@@ -54,19 +84,29 @@ class AppColorTheme extends ThemeExtension<AppColorTheme> {
     this.gbColor = const Color(0xFF8BC34A),
     this.gbcColor = const Color(0xFF03A9F4),
     this.gbaColor = const Color(0xFFE91E63),
-    this.nesColor = const Color(0xFFE53935), 
-    this.snesColor = const Color(0xFF7B1FA2), 
-    this.smsColor = const Color(0xFF1565C0), 
-    this.ggColor = const Color(0xFF00897B), 
-    this.mdColor = const Color(0xFFFF6F00), 
-    this.ngpColor = const Color(0xFF546E7A), 
-    this.wsColor = const Color(0xFF5C6BC0), 
-    this.wscColor = const Color(0xFFAB47BC), 
+    this.nesColor = const Color(0xFFE53935), // NES red
+    this.snesColor = const Color(0xFF7B1FA2), // SNES purple
+    this.smsColor = const Color(0xFF1565C0), // SMS blue
+    this.ggColor = const Color(0xFF00897B), // Game Gear teal
+    this.mdColor = const Color(0xFFFF6F00), // Mega Drive amber
+    this.ngpColor = const Color(0xFF546E7A), // NGP slate
+    this.wsColor = const Color(0xFF5C6BC0), // WS slate blue
+    this.wscColor = const Color(0xFFAB47BC), // WSC violet
+    this.a2600Color = const Color(0xFF8D6E63), // Atari 2600 woodgrain brown
+    this.vbColor = const Color(0xFFD32F2F), // Virtual Boy red
+    this.tic80Color = const Color(0xFF1A1A2E), // TIC-80 deep navy
+    this.pico8Color = const Color(0xFFFF77A8), // PICO-8 hot pink (color #14)
+    this.ndsColor = const Color(0xFF1976D2), // NDS clamshell blue
+    this.ps1Color = const Color(0xFF455A64), // PS1 gray
+    this.intvColor = const Color(0xFFBF360C), // Intellivision rust orange
     this.success = const Color(0xFF4CAF50),
     this.warning = const Color(0xFFFF9800),
     this.error = const Color(0xFFF44336),
   });
 
+  /// Convenient context-based accessor.
+  ///
+  /// Widgets that call this will automatically rebuild when the theme changes.
   static AppColorTheme of(BuildContext context) {
     return Theme.of(context).extension<AppColorTheme>()!;
   }
@@ -101,6 +141,13 @@ class AppColorTheme extends ThemeExtension<AppColorTheme> {
     Color? ngpColor,
     Color? wsColor,
     Color? wscColor,
+    Color? a2600Color,
+    Color? vbColor,
+    Color? tic80Color,
+    Color? pico8Color,
+    Color? ndsColor,
+    Color? ps1Color,
+    Color? intvColor,
     Color? success,
     Color? warning,
     Color? error,
@@ -134,6 +181,13 @@ class AppColorTheme extends ThemeExtension<AppColorTheme> {
       ngpColor: ngpColor ?? this.ngpColor,
       wsColor: wsColor ?? this.wsColor,
       wscColor: wscColor ?? this.wscColor,
+      a2600Color: a2600Color ?? this.a2600Color,
+      vbColor: vbColor ?? this.vbColor,
+      tic80Color: tic80Color ?? this.tic80Color,
+      pico8Color: pico8Color ?? this.pico8Color,
+      ndsColor: ndsColor ?? this.ndsColor,
+      ps1Color: ps1Color ?? this.ps1Color,
+      intvColor: intvColor ?? this.intvColor,
       success: success ?? this.success,
       warning: warning ?? this.warning,
       error: error ?? this.error,
@@ -176,6 +230,13 @@ class AppColorTheme extends ThemeExtension<AppColorTheme> {
       ngpColor: Color.lerp(ngpColor, other.ngpColor, t)!,
       wsColor: Color.lerp(wsColor, other.wsColor, t)!,
       wscColor: Color.lerp(wscColor, other.wscColor, t)!,
+      a2600Color: Color.lerp(a2600Color, other.a2600Color, t)!,
+      vbColor: Color.lerp(vbColor, other.vbColor, t)!,
+      tic80Color: Color.lerp(tic80Color, other.tic80Color, t)!,
+      pico8Color: Color.lerp(pico8Color, other.pico8Color, t)!,
+      ndsColor: Color.lerp(ndsColor, other.ndsColor, t)!,
+      ps1Color: Color.lerp(ps1Color, other.ps1Color, t)!,
+      intvColor: Color.lerp(intvColor, other.intvColor, t)!,
       success: Color.lerp(success, other.success, t)!,
       warning: Color.lerp(warning, other.warning, t)!,
       error: Color.lerp(error, other.error, t)!,
@@ -183,8 +244,10 @@ class AppColorTheme extends ThemeExtension<AppColorTheme> {
   }
 }
 
+/// All available app themes
 class AppThemes {
   static const List<AppColorTheme> all = [
+    // 0 — Neon Night (default, the original purple/teal theme)
     AppColorTheme(
       id: 'neon_night',
       name: 'Neon Night',
@@ -204,6 +267,8 @@ class AppThemes {
       textSecondary: Color(0xFFA0A0C0),
       textMuted: Color(0xFF606080),
     ),
+
+    // 1 — Crimson Blaze
     AppColorTheme(
       id: 'crimson_blaze',
       name: 'Crimson Blaze',
@@ -223,6 +288,8 @@ class AppThemes {
       textSecondary: Color(0xFFC0A0A0),
       textMuted: Color(0xFF806060),
     ),
+
+    // 2 — Cyberpunk
     AppColorTheme(
       id: 'cyberpunk',
       name: 'Cyberpunk',
@@ -242,6 +309,8 @@ class AppThemes {
       textSecondary: Color(0xFF7EB8C9),
       textMuted: Color(0xFF3E6A78),
     ),
+
+    // 3 — Emerald Forest
     AppColorTheme(
       id: 'emerald_forest',
       name: 'Emerald',
@@ -261,6 +330,8 @@ class AppThemes {
       textSecondary: Color(0xFF8DC49A),
       textMuted: Color(0xFF4E7B5C),
     ),
+
+    // 4 — Midnight Ocean
     AppColorTheme(
       id: 'midnight_ocean',
       name: 'Ocean',
@@ -280,6 +351,8 @@ class AppThemes {
       textSecondary: Color(0xFF90CAF9),
       textMuted: Color(0xFF4A7A9B),
     ),
+
+    // 5 — Sunset Haze
     AppColorTheme(
       id: 'sunset_haze',
       name: 'Sunset',
@@ -301,6 +374,7 @@ class AppThemes {
     ),
   ];
 
+  /// The default theme (Neon Night).
   static AppColorTheme get defaultTheme => all.first;
 
   static AppColorTheme getById(String id) {
@@ -313,6 +387,11 @@ class AppThemes {
   }
 }
 
+/// RetroPal theme configuration.
+///
+/// Call [YageTheme.darkTheme] with an [AppColorTheme] to get a fully
+/// configured [ThemeData] that carries the color theme as a
+/// [ThemeExtension] — accessible everywhere via [AppColorTheme.of].
 class YageTheme {
   static const String _fontFamily = 'Rajdhani';
   static const String _monoFontFamily = 'JetBrains Mono';
@@ -322,7 +401,12 @@ class YageTheme {
       useMaterial3: true,
       brightness: Brightness.dark,
       fontFamily: _fontFamily,
+
+      // Carry the full color theme so widgets can read it via
+      // AppColorTheme.of(context).
       extensions: [colors],
+
+      // Color scheme
       colorScheme: ColorScheme.dark(
         primary: colors.primary,
         secondary: colors.accent,
@@ -333,7 +417,11 @@ class YageTheme {
         onSurface: colors.textPrimary,
         onError: colors.textPrimary,
       ),
+
+      // Scaffold
       scaffoldBackgroundColor: colors.backgroundDark,
+
+      // AppBar
       appBarTheme: AppBarTheme(
         backgroundColor: colors.backgroundMedium,
         foregroundColor: colors.textPrimary,
@@ -346,12 +434,16 @@ class YageTheme {
           color: colors.textPrimary,
         ),
       ),
+
+      // Cards
       cardTheme: CardThemeData(
         color: colors.surface,
         elevation: 4,
         shadowColor: Colors.black54,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       ),
+
+      // Buttons
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
           backgroundColor: colors.primary,
@@ -383,12 +475,18 @@ class YageTheme {
       textButtonTheme: TextButtonThemeData(
         style: TextButton.styleFrom(foregroundColor: colors.accent),
       ),
+
+      // FAB
       floatingActionButtonTheme: FloatingActionButtonThemeData(
         backgroundColor: colors.accent,
         foregroundColor: colors.backgroundDark,
         elevation: 6,
       ),
+
+      // Icons
       iconTheme: IconThemeData(color: colors.textPrimary, size: 24),
+
+      // Text
       textTheme: TextTheme(
         displayLarge: TextStyle(
           fontFamily: _fontFamily,
@@ -464,6 +562,8 @@ class YageTheme {
           color: colors.textMuted,
         ),
       ),
+
+      // Input decoration
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
         fillColor: colors.backgroundLight,
@@ -485,6 +585,8 @@ class YageTheme {
           vertical: 14,
         ),
       ),
+
+      // Slider
       sliderTheme: SliderThemeData(
         activeTrackColor: colors.primary,
         inactiveTrackColor: colors.surfaceLight,
@@ -492,6 +594,8 @@ class YageTheme {
         overlayColor: colors.accent.withAlpha(51),
         trackHeight: 4,
       ),
+
+      // Switch
       switchTheme: SwitchThemeData(
         thumbColor: WidgetStateProperty.resolveWith((states) {
           if (states.contains(WidgetState.selected)) {
@@ -506,7 +610,11 @@ class YageTheme {
           return colors.surfaceLight;
         }),
       ),
+
+      // Divider
       dividerTheme: DividerThemeData(color: colors.surfaceLight, thickness: 1),
+
+      // Bottom nav
       bottomNavigationBarTheme: BottomNavigationBarThemeData(
         backgroundColor: colors.backgroundMedium,
         selectedItemColor: colors.accent,
@@ -514,20 +622,28 @@ class YageTheme {
         type: BottomNavigationBarType.fixed,
         elevation: 8,
       ),
+
+      // Dialogs
       dialogTheme: DialogThemeData(
         backgroundColor: colors.surface,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       ),
+
+      // Snackbar
       snackBarTheme: SnackBarThemeData(
         backgroundColor: colors.surfaceLight,
         contentTextStyle: TextStyle(color: colors.textPrimary),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         behavior: SnackBarBehavior.floating,
       ),
+
+      // Progress indicator
       progressIndicatorTheme: ProgressIndicatorThemeData(
         color: colors.accent,
         linearTrackColor: colors.surfaceLight,
       ),
+
+      // Tab bar
       tabBarTheme: TabBarThemeData(
         labelColor: colors.textPrimary,
         unselectedLabelColor: colors.textMuted,

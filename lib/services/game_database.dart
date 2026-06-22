@@ -9,23 +9,38 @@ import '../core/mgba_bindings.dart';
 import '../models/cheat.dart';
 import '../models/game_rom.dart';
 
+/// SQLite database for persisting the game library.
+///
+/// Replaces the previous SharedPreferences JSON-blob approach, which does not
+/// scale well as the library grows because every mutation rewrites the entire
+/// blob.  With SQLite each operation is an efficient row-level write.
 class GameDatabase {
   static const int _version = 3;
   static const String _dbName = 'game_library.db';
 
+  /// SharedPreferences keys used by the legacy JSON storage.
   static const String _legacyGamesKey = 'game_library';
   static const String _legacyDirsKey = 'rom_directories';
 
   Database? _db;
 
+  /// The opened database instance.  Call [open] first.
   Database get db {
-    assert(_db != null, 'GameDatabase.open() must be called before accessing db');
+    assert(
+      _db != null,
+      'GameDatabase.open() must be called before accessing db',
+    );
     return _db!;
   }
 
   bool get isOpen => _db != null;
 
-  Future<void> open() async {
+  // ──────────── Open / create ────────────
+
+  /// Open (or create) the database and run any pending migrations.
+  /// If legacy SharedPreferences data exists it is migrated automatically.
+  /// Throws on disk full, permission denied, or corrupt SQLite.
+  Future<void> open({bool migrateLegacyData = true}) async {
     if (_db != null) return;
 
     try {
@@ -33,15 +48,64 @@ class GameDatabase {
       _db = await openDatabase(
         dbPath,
         version: _version,
+        onConfigure: _onConfigure,
         onCreate: _onCreate,
         onUpgrade: _onUpgrade,
       );
-      await _migrateLegacyData();
+
+      // One-time migration from SharedPreferences -> SQLite. Android TV
+      // launches must not touch legacy SharedPreferences on the critical path:
+      // some Sony/MediaTek builds can stall long enough to trigger a launch
+      // ANR before the app receives a focused window.
+      if (migrateLegacyData) {
+        await _migrateLegacyData();
+      }
     } catch (e) {
       _db = null;
       rethrow;
     }
   }
+
+  /// Runs on every connection, before [onCreate] / [onUpgrade].
+  ///
+  /// * WAL mode is enabled automatically by sqflite_android (via
+  ///   `SQLiteDatabase.ENABLE_WRITE_AHEAD_LOGGING`), so no PRAGMA needed.
+  /// * `busy_timeout` gives sqflite a 5 s budget to retry on contention
+  ///   instead of immediately failing with `SQLITE_BUSY`.
+  /// * `foreign_keys=ON` is defensive — sqflite defaults to off.
+  Future<void> _onConfigure(Database db) async {
+    try {
+      // `PRAGMA busy_timeout=N` RETURNS the new value as a result row, so on
+      // Android's SQLiteDatabase it must be issued via rawQuery — db.execute()
+      // rejects statements that return rows ("Queries can be performed using
+      // SQLiteDatabase query or rawQuery methods only"), which is exactly the
+      // error this used to log on every launch (phone + TV).
+      await db.rawQuery('PRAGMA busy_timeout = 5000');
+    } catch (e) {
+      debugPrint('GameDatabase: PRAGMA busy_timeout failed — $e');
+    }
+    try {
+      await db.execute('PRAGMA foreign_keys=ON');
+    } catch (e) {
+      debugPrint('GameDatabase: PRAGMA foreign_keys failed — $e');
+    }
+  }
+
+  /// Shared DDL for the cheats table. Defined once so onCreate and
+  /// onUpgrade can't drift out of sync.
+  static const String _createCheatsTableSql = '''
+    CREATE TABLE IF NOT EXISTS cheats (
+      id          TEXT PRIMARY KEY,
+      game_path   TEXT NOT NULL,
+      system      TEXT NOT NULL,
+      title       TEXT NOT NULL,
+      cheat_code  TEXT NOT NULL,
+      cheat_type  TEXT NOT NULL,
+      is_active   INTEGER NOT NULL DEFAULT 0
+    )
+  ''';
+  static const String _createCheatsIndexSql =
+      'CREATE INDEX IF NOT EXISTS idx_cheats_game_path ON cheats(game_path)';
 
   Future<void> _onCreate(Database db, int version) async {
     try {
@@ -70,21 +134,8 @@ class GameDatabase {
         'CREATE INDEX IF NOT EXISTS idx_games_rom_hash ON games(rom_hash)',
       );
 
-      await db.execute('''
-        CREATE TABLE IF NOT EXISTS cheats (
-          id          TEXT PRIMARY KEY,
-          game_path   TEXT NOT NULL,
-          system      TEXT NOT NULL,
-          title       TEXT NOT NULL,
-          cheat_code  TEXT NOT NULL,
-          cheat_type  TEXT NOT NULL,
-          is_active   INTEGER NOT NULL DEFAULT 0
-        )
-      ''');
-
-      await db.execute(
-        'CREATE INDEX IF NOT EXISTS idx_cheats_game_path ON cheats(game_path)',
-      );
+      await db.execute(_createCheatsTableSql);
+      await db.execute(_createCheatsIndexSql);
     } catch (e) {
       debugPrint('GameDatabase: onCreate failed — $e');
       rethrow;
@@ -99,22 +150,12 @@ class GameDatabase {
       );
     }
     if (oldVersion < 3) {
-      await db.execute('''
-        CREATE TABLE IF NOT EXISTS cheats (
-          id          TEXT PRIMARY KEY,
-          game_path   TEXT NOT NULL,
-          system      TEXT NOT NULL,
-          title       TEXT NOT NULL,
-          cheat_code  TEXT NOT NULL,
-          cheat_type  TEXT NOT NULL,
-          is_active   INTEGER NOT NULL DEFAULT 0
-        )
-      ''');
-      await db.execute(
-        'CREATE INDEX IF NOT EXISTS idx_cheats_game_path ON cheats(game_path)',
-      );
+      await db.execute(_createCheatsTableSql);
+      await db.execute(_createCheatsIndexSql);
     }
   }
+
+  // ──────────── Legacy migration ────────────
 
   Future<void> _migrateLegacyData() async {
     final prefs = await SharedPreferences.getInstance();
@@ -131,7 +172,11 @@ class GameDatabase {
       for (final json in gamesList) {
         try {
           final map = json as Map<String, dynamic>;
-          if (map['path'] == null || map['name'] == null || map['extension'] == null) {
+          // Skip entries missing required fields instead of aborting the
+          // entire migration.
+          if (map['path'] == null ||
+              map['name'] == null ||
+              map['extension'] == null) {
             skipped++;
             continue;
           }
@@ -152,31 +197,39 @@ class GameDatabase {
       final dirs = prefs.getStringList(_legacyDirsKey);
       if (dirs != null) {
         for (final dir in dirs) {
-          batch.insert(
-            'rom_directories',
-            {'path': dir},
-            conflictAlgorithm: ConflictAlgorithm.ignore,
-          );
+          batch.insert('rom_directories', {
+            'path': dir,
+          }, conflictAlgorithm: ConflictAlgorithm.ignore);
         }
       }
 
       await batch.commit(noResult: true);
+
+      // Clear legacy keys so migration runs only once.
       await prefs.remove(_legacyGamesKey);
       await prefs.remove(_legacyDirsKey);
 
-      debugPrint('GameDatabase: migration complete (${gamesList.length} games).');
+      debugPrint(
+        'GameDatabase: migration complete (${gamesList.length} games).',
+      );
     } catch (e) {
       debugPrint('GameDatabase: migration failed — $e');
+      // Non-fatal: the legacy data stays in SharedPreferences so the user
+      // can retry on next launch.
     }
   }
 
+  /// Convert a legacy JSON map (same format as GameRom.toJson) to a flat
+  /// row map suitable for SQLite insertion.
   static Map<String, Object?> _gameJsonToRow(Map<String, dynamic> json) {
+    // Platform: legacy data may store as int index or string name.
     final rawPlatform = json['platform'];
     final String platformStr;
     if (rawPlatform is String) {
       platformStr = rawPlatform;
     } else if (rawPlatform is int) {
-      platformStr = GamePlatform.values.elementAtOrNull(rawPlatform)?.name ?? 'unknown';
+      platformStr =
+          GamePlatform.values.elementAtOrNull(rawPlatform)?.name ?? 'unknown';
     } else {
       platformStr = 'unknown';
     }
@@ -186,7 +239,7 @@ class GameDatabase {
       'name': json['name'] as String,
       'extension': json['extension'] as String,
       'platform': platformStr,
-      'size_bytes': json['sizeBytes'] as int,
+      'size_bytes': (json['sizeBytes'] as num?)?.toInt() ?? 0,
       'last_played': json['lastPlayed'] as String?,
       'cover_path': json['coverPath'] as String?,
       'is_favorite': (json['isFavorite'] as bool? ?? false) ? 1 : 0,
@@ -195,6 +248,10 @@ class GameDatabase {
     };
   }
 
+  // ──────────── CRUD helpers ────────────
+
+  /// Read all games from the database, ordered by name.
+  /// Returns empty list on SQLiteException, disk full, or corrupt DB.
   Future<List<GameRom>> getAllGames() async {
     try {
       final rows = await db.query('games', orderBy: 'name COLLATE NOCASE ASC');
@@ -205,10 +262,14 @@ class GameDatabase {
     }
   }
 
+  /// Insert or replace a single game.
   Future<bool> upsertGame(GameRom game, {String? romHash}) async {
     try {
-      await db.insert('games', _gameRomToRow(game, romHash: romHash),
-          conflictAlgorithm: ConflictAlgorithm.replace);
+      await db.insert(
+        'games',
+        _gameRomToRow(game, romHash: romHash),
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
       return true;
     } catch (e) {
       debugPrint('GameDatabase: upsertGame failed — $e');
@@ -216,13 +277,20 @@ class GameDatabase {
     }
   }
 
-  Future<bool> upsertGames(List<GameRom> games, {Map<String, String>? romHashes}) async {
+  /// Insert or replace many games in a single transaction.
+  Future<bool> upsertGames(
+    List<GameRom> games, {
+    Map<String, String>? romHashes,
+  }) async {
     try {
       final batch = db.batch();
       for (final game in games) {
         final hash = romHashes?[game.path];
-        batch.insert('games', _gameRomToRow(game, romHash: hash),
-            conflictAlgorithm: ConflictAlgorithm.replace);
+        batch.insert(
+          'games',
+          _gameRomToRow(game, romHash: hash),
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
       }
       await batch.commit(noResult: true);
       return true;
@@ -232,6 +300,8 @@ class GameDatabase {
     }
   }
 
+  /// Check if a game with the given content hash already exists.
+  /// Returns the existing game's path if found, null otherwise.
   Future<String?> getPathByRomHash(String romHash) async {
     try {
       final rows = await db.query(
@@ -249,6 +319,7 @@ class GameDatabase {
     }
   }
 
+  /// Delete a game by path.
   Future<bool> deleteGame(String path) async {
     try {
       await db.delete('games', where: 'path = ?', whereArgs: [path]);
@@ -259,6 +330,7 @@ class GameDatabase {
     }
   }
 
+  /// Delete all games whose path starts with [prefix].
   Future<bool> deleteGamesWithPrefix(String prefix) async {
     try {
       final escaped = prefix.replaceAll('%', r'\%').replaceAll('_', r'\_');
@@ -274,6 +346,7 @@ class GameDatabase {
     }
   }
 
+  /// Update specific columns for a game identified by [path].
   Future<bool> updateGame(String path, Map<String, Object?> values) async {
     try {
       await db.update('games', values, where: 'path = ?', whereArgs: [path]);
@@ -283,6 +356,8 @@ class GameDatabase {
       return false;
     }
   }
+
+  // ──────────── ROM directories ────────────
 
   Future<List<String>> getRomDirectories() async {
     try {
@@ -296,8 +371,9 @@ class GameDatabase {
 
   Future<bool> addRomDirectory(String path) async {
     try {
-      await db.insert('rom_directories', {'path': path},
-          conflictAlgorithm: ConflictAlgorithm.ignore);
+      await db.insert('rom_directories', {
+        'path': path,
+      }, conflictAlgorithm: ConflictAlgorithm.ignore);
       return true;
     } catch (e) {
       debugPrint('GameDatabase: addRomDirectory failed — $e');
@@ -314,6 +390,8 @@ class GameDatabase {
       return false;
     }
   }
+
+  // ──────────── Row ↔ GameRom conversion ────────────
 
   static GameRom _rowToGameRom(Map<String, Object?> row) {
     return GameRom(
@@ -353,6 +431,9 @@ class GameDatabase {
     );
   }
 
+  // ──────────── Cheats ────────────
+
+  /// Load all cheats for a game identified by its ROM path.
   Future<List<Cheat>> getCheatsForGame(String gamePath) async {
     try {
       final rows = await db.query(
@@ -367,10 +448,14 @@ class GameDatabase {
     }
   }
 
+  /// Insert or update a single cheat.
   Future<bool> upsertCheat(Cheat cheat) async {
     try {
-      await db.insert('cheats', cheat.toRow(),
-          conflictAlgorithm: ConflictAlgorithm.replace);
+      await db.insert(
+        'cheats',
+        cheat.toRow(),
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
       return true;
     } catch (e) {
       debugPrint('GameDatabase: upsertCheat failed — $e');
@@ -378,6 +463,7 @@ class GameDatabase {
     }
   }
 
+  /// Update only the [is_active] flag for a cheat.
   Future<bool> updateCheatActive(String cheatId, bool isActive) async {
     try {
       await db.update(
@@ -393,6 +479,7 @@ class GameDatabase {
     }
   }
 
+  /// Delete a cheat by its [id].
   Future<bool> deleteCheat(String cheatId) async {
     try {
       await db.delete('cheats', where: 'id = ?', whereArgs: [cheatId]);
@@ -403,6 +490,7 @@ class GameDatabase {
     }
   }
 
+  /// Delete all cheats for a game.
   Future<bool> deleteCheatsForGame(String gamePath) async {
     try {
       await db.delete('cheats', where: 'game_path = ?', whereArgs: [gamePath]);
@@ -412,6 +500,8 @@ class GameDatabase {
       return false;
     }
   }
+
+  // ──────────── Lifecycle ────────────
 
   Future<void> close() async {
     try {

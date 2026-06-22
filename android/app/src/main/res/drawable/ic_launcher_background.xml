@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive-icon background: the YAGE brand purple, matching the legacy
+     ic_launcher.png (a subtle top-to-bottom violet gradient). Fills the full
+     108dp adaptive canvas so the launcher mask renders a purple background
+     with the white controller foreground in the centre. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <gradient
+        android:type="linear"
+        android:angle="270"
+        android:startColor="@color/ic_launcher_background_top"
+        android:endColor="@color/ic_launcher_background_bottom" />
+</shape>

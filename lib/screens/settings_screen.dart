@@ -9,9 +9,11 @@ import '../utils/safe_url_launcher.dart';
 import '../utils/tv_detector.dart';
 import '../widgets/tv_http_upload_dialog.dart';
 
+import '../core/mgba_bindings.dart';
 import '../models/emulator_settings.dart';
 import '../models/game_rom.dart';
 import '../models/gamepad_skin.dart';
+import '../services/bios_service.dart';
 import '../services/settings_service.dart';
 import '../services/game_library_service.dart';
 import '../services/emulator_service.dart';
@@ -21,6 +23,7 @@ import '../services/consent_service.dart';
 import '../services/cover_art_service.dart';
 import '../services/app_version_service.dart';
 import '../services/remove_ads_purchase_service.dart';
+import '../utils/graphics_quality.dart';
 import '../utils/theme.dart';
 import '../widgets/banner_ad_widget.dart';
 import '../widgets/tv_focusable.dart';
@@ -29,6 +32,12 @@ import 'ra_login_screen.dart';
 
 const _deviceChannel = MethodChannel('com.yourmateapps.retropal/device');
 
+/// Settings screen — organized into 5 focused tabs for quick D-pad / touch
+/// navigation: Controls, BIOS, Trophies, Data, Pro.
+///
+/// Display options live as a sub-section inside the Controls tab so the
+/// scarce top-level tab slots are reserved for high-traffic concerns
+/// (controls, BIOS for NDS / PS1 / Intellivision, etc.).
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
 
@@ -70,19 +79,25 @@ class _SettingsScreenState extends State<SettingsScreen>
     super.dispose();
   }
 
+  /// When app resumes from background (e.g. returning from external browser
+  /// after opening Privacy Policy), restore focus so D-pad works again.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed && mounted) {
+      // Small delay allows Flutter to finish restoring the widget tree
       Future.delayed(const Duration(milliseconds: 200), () {
         if (mounted) _keyFocusNode.requestFocus();
       });
     }
   }
 
+  /// Gamepad L1 / R1 bumpers switch tabs, consistent with the home screen.
   KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
 
     final key = event.logicalKey;
+
+    // L1 / PageUp → previous tab
     if (key == LogicalKeyboardKey.gameButtonLeft1 ||
         key == LogicalKeyboardKey.pageUp) {
       final newIndex = (_tabController.index - 1).clamp(
@@ -94,6 +109,7 @@ class _SettingsScreenState extends State<SettingsScreen>
       }
       return KeyEventResult.handled;
     }
+    // R1 / PageDown → next tab
     if (key == LogicalKeyboardKey.gameButtonRight1 ||
         key == LogicalKeyboardKey.pageDown) {
       final newIndex = (_tabController.index + 1).clamp(
@@ -132,6 +148,9 @@ class _SettingsScreenState extends State<SettingsScreen>
             policy: OrderedTraversalPolicy(),
             child: Column(
               children: [
+                // ── Tab bar ── sits in the body (not AppBar.bottom) so that
+                // FocusTraversalOrder gives D-pad users a clean path:
+                //   back button → tabs → tab content.
                 FocusTraversalOrder(
                   order: const NumericFocusOrder(0),
                   child: Material(
@@ -148,6 +167,7 @@ class _SettingsScreenState extends State<SettingsScreen>
                         fontWeight: FontWeight.bold,
                       ),
                       unselectedLabelStyle: const TextStyle(fontSize: 11),
+                      // Prominent focus ring for TV / keyboard navigation
                       overlayColor: WidgetStateProperty.resolveWith((states) {
                         if (states.contains(WidgetState.focused)) {
                           return colors.accent.withAlpha(50);
@@ -161,12 +181,13 @@ class _SettingsScreenState extends State<SettingsScreen>
                       dividerHeight: 0,
                       tabs: const [
                         Tab(
-                          icon: Icon(Icons.display_settings, size: 20),
-                          text: 'Display',
-                        ),
-                        Tab(
                           icon: Icon(Icons.sports_esports, size: 20),
                           text: 'Controls',
+                        ),
+                        Tab(
+                          // memory chip / processor icon
+                          icon: Icon(Icons.memory, size: 20),
+                          text: 'BIOS',
                         ),
                         Tab(
                           icon: Icon(Icons.emoji_events, size: 20),
@@ -184,6 +205,7 @@ class _SettingsScreenState extends State<SettingsScreen>
                     ),
                   ),
                 ),
+                // ── Tab content ──
                 Expanded(
                   child: FocusTraversalOrder(
                     order: const NumericFocusOrder(1),
@@ -196,7 +218,7 @@ class _SettingsScreenState extends State<SettingsScreen>
                           children: [
                             _buildTabTraversal(
                               0,
-                              _buildDisplayTab(
+                              _buildControlsTab(
                                 context,
                                 settings,
                                 settingsService,
@@ -205,12 +227,7 @@ class _SettingsScreenState extends State<SettingsScreen>
                             ),
                             _buildTabTraversal(
                               1,
-                              _buildControlsTab(
-                                context,
-                                settings,
-                                settingsService,
-                                colors,
-                              ),
+                              _buildBiosTab(context, colors),
                             ),
                             _buildTabTraversal(
                               2,
@@ -262,7 +279,11 @@ class _SettingsScreenState extends State<SettingsScreen>
     );
   }
 
-  Widget _buildDisplayTab(
+  // ═══════════════════════════════════════════════════════════════════════
+  //  Tab 1 — Controls (includes Display sub-section, Audio, Touch, Emulation)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  Widget _buildControlsTab(
     BuildContext context,
     EmulatorSettings settings,
     SettingsService settingsService,
@@ -271,6 +292,7 @@ class _SettingsScreenState extends State<SettingsScreen>
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
+        // ── Theme ── (moved from former Display tab)
         _SectionHeader(title: 'Theme'),
         _ThemePicker(
           selectedThemeId: settings.selectedTheme,
@@ -278,6 +300,8 @@ class _SettingsScreenState extends State<SettingsScreen>
         ),
 
         const SizedBox(height: 16),
+
+        // ── Display ── (moved from former Display tab)
         _SectionHeader(title: 'Display'),
         _SettingsCard(
           children: [
@@ -286,6 +310,7 @@ class _SettingsScreenState extends State<SettingsScreen>
               title: 'Show FPS',
               subtitle: 'Display frame rate counter',
               value: settings.showFps,
+              autofocus: true,
               onChanged: (_) => settingsService.toggleShowFps(),
             ),
             const Divider(height: 1),
@@ -297,51 +322,51 @@ class _SettingsScreenState extends State<SettingsScreen>
               onChanged: (_) => settingsService.toggleAspectRatio(),
             ),
             const Divider(height: 1),
+            _SliderTile(
+              icon: Icons.fit_screen,
+              title: 'Game Screen Size',
+              value: settings.gameScreenScale,
+              min: 0.5,
+              max: 1.0,
+              divisions: 10,
+              labelSuffix: '%',
+              labelMultiplier: 100,
+              onChanged: settingsService.setGameScreenScale,
+            ),
+            const Divider(height: 1),
+            _AutoOptimizedTile(
+              active: settings.graphicsMode == GraphicsMode.autoOptimized,
+            ),
+            const Divider(height: 1),
             _SwitchTile(
-              icon: Icons.blur_on,
-              title: 'Smooth Scaling',
-              subtitle:
-                  'ON = smooth, modern look · OFF = crisp, pixelated retro look',
-              value: settings.enableFiltering,
-              onChanged: (_) => settingsService.toggleFiltering(),
+              icon: Icons.grid_on,
+              title: 'Authentic Pixel Mode',
+              subtitle: 'Exact original pixels with black borders',
+              value: settings.graphicsMode == GraphicsMode.authenticPixel,
+              onChanged: (_) => settingsService.setAuthenticPixelMode(
+                settings.graphicsMode != GraphicsMode.authenticPixel,
+              ),
             ),
             const Divider(height: 1),
             _PaletteTile(
               selectedIndex: settings.selectedColorPalette,
               onChanged: settingsService.setColorPalette,
             ),
-          ],
-        ),
-
-        const SizedBox(height: 16),
-        _SectionHeader(title: 'Super Game Boy'),
-        _SettingsCard(
-          children: [
+            const Divider(height: 1),
             _SwitchTile(
               icon: Icons.border_all,
               title: 'SGB Borders',
               subtitle:
-                  'Show decorative borders for SGB-enhanced games (requires game reload)',
+                  'Decorative borders for SGB-enhanced games (requires game reload)',
               value: settings.enableSgbBorders,
               onChanged: (_) => settingsService.toggleSgbBorders(),
             ),
           ],
         ),
 
-        const SizedBox(height: 32),
-      ],
-    );
-  }
+        const SizedBox(height: 16),
 
-  Widget _buildControlsTab(
-    BuildContext context,
-    EmulatorSettings settings,
-    SettingsService settingsService,
-    AppColorTheme colors,
-  ) {
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
+        // ── Audio ──
         _SectionHeader(title: 'Audio'),
         _SettingsCard(
           children: [
@@ -350,7 +375,6 @@ class _SettingsScreenState extends State<SettingsScreen>
               title: 'Enable Sound',
               subtitle: 'Play game audio',
               value: settings.enableSound,
-              autofocus: true,
               onChanged: (_) => settingsService.toggleSound(),
             ),
             if (settings.enableSound) ...[
@@ -366,6 +390,8 @@ class _SettingsScreenState extends State<SettingsScreen>
         ),
 
         const SizedBox(height: 16),
+
+        // ── Touch Controls ──
         _SectionHeader(title: 'Touch Controls'),
         _SettingsCard(
           children: [
@@ -411,6 +437,8 @@ class _SettingsScreenState extends State<SettingsScreen>
         ),
 
         const SizedBox(height: 16),
+
+        // ── Emulation ──
         _SectionHeader(title: 'Emulation'),
         _SettingsCard(
           children: [
@@ -464,6 +492,111 @@ class _SettingsScreenState extends State<SettingsScreen>
     );
   }
 
+  // ═══════════════════════════════════════════════════════════════════════
+  //  Tab 2 — BIOS (NDS, PS1, Intellivision)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  Widget _buildBiosTab(BuildContext context, AppColorTheme colors) {
+    return Consumer<BiosService>(
+      builder: (context, biosService, _) {
+        return ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            // ── Legal note ──
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: colors.warning.withAlpha(28),
+                border: Border.all(color: colors.warning.withAlpha(80)),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.info_outline, color: colors.warning, size: 20),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'BIOS files are not included. Only use BIOS dumps from '
+                      'hardware you own. NDS and PS1 use HLE or OpenBIOS '
+                      'fallbacks on mobile; Android TV requires real BIOS '
+                      'files for all three systems.',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: colors.textSecondary,
+                        height: 1.4,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            const SizedBox(height: 16),
+
+            // ── NDS ──
+            _BiosPlatformSection(
+              platform: GamePlatform.nds,
+              biosService: biosService,
+              title: 'Nintendo DS',
+              subtitle:
+                  'melonDS · BIOS optional on mobile (FreeBIOS HLE), required on Android TV',
+              autofocus: true,
+            ),
+
+            const SizedBox(height: 16),
+
+            // ── PS1 ──
+            _BiosPlatformSection(
+              platform: GamePlatform.ps1,
+              biosService: biosService,
+              title: 'Sony PlayStation',
+              subtitle:
+                  'Beetle PSX HW · OpenBIOS fallback on mobile, real BIOS required on Android TV',
+            ),
+
+            const SizedBox(height: 16),
+
+            // ── Intellivision ──
+            _BiosPlatformSection(
+              platform: GamePlatform.intv,
+              biosService: biosService,
+              title: 'Mattel Intellivision',
+              subtitle:
+                  'FreeIntv · No HLE exists; exec.bin + grom.bin are mandatory on every platform',
+            ),
+
+            const SizedBox(height: 16),
+
+            _SettingsCard(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Text(
+                    'Tip: BIOS files can also be uploaded over Wi-Fi from a '
+                    'desktop browser. Start the file manager from the home '
+                    'screen and switch to the BIOS tab.',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: colors.textSecondary,
+                      height: 1.4,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 32),
+          ],
+        );
+      },
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  Tab 4 — Data (Library + Backup + About)
+  // ═══════════════════════════════════════════════════════════════════════
+
   Widget _buildDataTab(
     BuildContext context,
     EmulatorSettings settings,
@@ -473,6 +606,7 @@ class _SettingsScreenState extends State<SettingsScreen>
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
+        // ── Library ──
         _SectionHeader(title: 'Library'),
         _SettingsCard(
           children: [
@@ -517,6 +651,8 @@ class _SettingsScreenState extends State<SettingsScreen>
         ),
 
         const SizedBox(height: 16),
+
+        // ── Backup & Restore ──
         _SectionHeader(title: 'Backup & Restore'),
         _SettingsCard(
           children: [
@@ -531,6 +667,7 @@ class _SettingsScreenState extends State<SettingsScreen>
               title: 'Import Saves from ZIP',
               onTap: () => _importSaves(context),
             ),
+            // Google Drive options — hidden on TV (GMS unreliable on Android TV)
             if (!TvDetector.isTV) ...[
               const Divider(height: 1),
               _ActionTile(
@@ -549,6 +686,8 @@ class _SettingsScreenState extends State<SettingsScreen>
         ),
 
         const SizedBox(height: 16),
+
+        // ── About ──
         _SectionHeader(title: 'About'),
         _SettingsCard(
           children: [
@@ -584,7 +723,28 @@ class _SettingsScreenState extends State<SettingsScreen>
                   '  © Charles MacDonald, Eke-Eke — https://github.com/ekeeke/Genesis-Plus-GX\n\n'
                   '• Mupen64Plus-Next (Nintendo 64)\n'
                   '  GNU General Public License v2 or later (GPL-2.0+)\n'
-                  '  © libretro and Mupen64Plus-Next contributors',
+                  '  © libretro and Mupen64Plus-Next contributors\n\n'
+                  '• melonDS (Nintendo DS / DSi)\n'
+                  '  GNU General Public License v3 (GPL-3.0)\n'
+                  '  © melonDS team — https://melonds.kuribo64.net\n'
+                  '  Ships with built-in FreeBIOS for HLE boot when no\n'
+                  '  user BIOS is supplied.\n\n'
+                  '• Beetle PSX HW (Sony PlayStation 1)\n'
+                  '  GNU General Public License v2 (GPL-2.0)\n'
+                  '  © Mednafen authors / libretro contributors\n\n'
+                  '• OpenBIOS (PS1 free fallback BIOS)\n'
+                  '  GNU General Public License v2 (GPL-2.0)\n'
+                  '  © PCSX-Redux contributors — https://github.com/grumpycoders/pcsx-redux\n'
+                  '  Clean-room implementation, NOT derived from Sony\n'
+                  '  firmware. Bundled so PS1 games can launch without\n'
+                  '  proprietary BIOS. Compatibility is limited compared\n'
+                  '  to real BIOS dumps.\n\n'
+                  '• FreeIntv (Mattel Intellivision)\n'
+                  '  GNU General Public License v3 (GPL-3.0)\n'
+                  '  © libretro and FreeIntv contributors\n\n'
+                  'BIOS files are not provided. Original copyrighted BIOS '
+                  'dumps must be supplied by the user — only from hardware '
+                  'you legally own.',
             ),
             const Divider(height: 1),
             _ActionTile(
@@ -633,7 +793,7 @@ class _SettingsScreenState extends State<SettingsScreen>
             _ActionTile(
               icon: Icons.restore,
               title: 'Reset to Defaults',
-              onTap: () => _confirmReset(context),
+              onTap: () => _confirmReset(context, settingsService),
               isDestructive: true,
             ),
           ],
@@ -657,6 +817,10 @@ class _SettingsScreenState extends State<SettingsScreen>
     );
   }
 
+  // ═══════════════════════════════════════════════════════════════════════
+  //  Tab 5 — RetroPal Pro
+  // ═══════════════════════════════════════════════════════════════════════
+
   Widget _buildProTab(
     BuildContext context,
     EmulatorSettings settings,
@@ -668,6 +832,7 @@ class _SettingsScreenState extends State<SettingsScreen>
         return ListView(
           padding: const EdgeInsets.all(16),
           children: [
+            // ── Hero section ──
             _SettingsCard(
               children: [
                 Padding(
@@ -709,6 +874,8 @@ class _SettingsScreenState extends State<SettingsScreen>
             ),
 
             const SizedBox(height: 16),
+
+            // ── Purchase status / actions ──
             if (purchaseService.adsRemoved) ...[
               _SettingsCard(
                 children: [
@@ -761,6 +928,8 @@ class _SettingsScreenState extends State<SettingsScreen>
             ],
 
             const SizedBox(height: 16),
+
+            // ── What you get ──
             _SectionHeader(title: 'What You Get'),
             _SettingsCard(
               children: [
@@ -792,6 +961,10 @@ class _SettingsScreenState extends State<SettingsScreen>
     );
   }
 
+  // ═══════════════════════════════════════════════════════════════════════
+  //  Tab 3 — Trophies (RetroAchievements)
+  // ═══════════════════════════════════════════════════════════════════════
+
   Widget _buildAchievementsTab(
     BuildContext context,
     EmulatorSettings settings,
@@ -802,6 +975,8 @@ class _SettingsScreenState extends State<SettingsScreen>
       padding: const EdgeInsets.all(16),
       children: [
         _SectionHeader(title: 'RetroAchievements (Softcore Only)'),
+
+        // Master enable/disable toggle
         _SettingsCard(
           children: [
             _SwitchTile(
@@ -814,9 +989,13 @@ class _SettingsScreenState extends State<SettingsScreen>
             ),
           ],
         ),
+
+        // Everything below is gated on raEnabled
         if (settings.raEnabled) ...[
           const SizedBox(height: 12),
           _RetroAchievementsTile(),
+
+          // Show mode/notification settings only when logged in
           Consumer<RetroAchievementsService>(
             builder: (context, raService, _) {
               if (!raService.isLoggedIn) return const SizedBox.shrink();
@@ -825,6 +1004,17 @@ class _SettingsScreenState extends State<SettingsScreen>
                   const SizedBox(height: 12),
                   _SettingsCard(
                     children: [
+                      // TODO: Hardcore mode – requires RA approval before enabling
+                      // _SwitchTile(
+                      //   icon: Icons.shield,
+                      //   title: 'Hardcore Mode',
+                      //   subtitle:
+                      //       'Disable savestates, cheats, rewind, and fast-forward',
+                      //   value: settings.raHardcoreMode,
+                      //   onChanged: (_) =>
+                      //       settingsService.toggleRAHardcoreMode(),
+                      // ),
+                      // const Divider(height: 1),
                       _ActionTile(
                         icon: Icons.key,
                         title: 'Change Password',
@@ -847,6 +1037,8 @@ class _SettingsScreenState extends State<SettingsScreen>
           ),
 
           const SizedBox(height: 12),
+
+          // Disclosure
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
             child: Row(
@@ -856,8 +1048,9 @@ class _SettingsScreenState extends State<SettingsScreen>
                 const SizedBox(width: 6),
                 Expanded(
                   child: Text(
-                    'Uses RetroAchievements. Your credentials are '
-                    'stored securely on-device and never shared.',
+                    'Uses RetroAchievements. Your credentials are stored '
+                    'securely on-device and shared only with '
+                    'retroachievements.org.',
                     style: TextStyle(
                       fontSize: 11,
                       color: colors.textMuted,
@@ -874,6 +1067,10 @@ class _SettingsScreenState extends State<SettingsScreen>
       ],
     );
   }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  Action methods
+  // ═══════════════════════════════════════════════════════════════════════
 
   void _showRomFolders(BuildContext context) {
     final colors = AppColorTheme.of(context);
@@ -1036,11 +1233,34 @@ class _SettingsScreenState extends State<SettingsScreen>
     );
   }
 
+  /// Open the ROM folder setup dialog (set folder for sync, import on reinstall).
+  ///
+  /// On Android TV there is no native folder picker worth surfacing — ROMs
+  /// arrive via the built-in HTTP upload server. Short-circuit to that
+  /// dialog directly so TV users never see the intermediate "Set Up Your
+  /// Games Folder" step.
   Future<void> _openRomFolderSetup(
     BuildContext context,
     void Function(void Function()) setState,
   ) async {
     final parentContext = context;
+
+    if (TvDetector.isTV) {
+      final result = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        useRootNavigator: false,
+        builder: (_) => TvHttpUploadDialog(parentContext: parentContext),
+      );
+      if (result == true && parentContext.mounted) {
+        await parentContext
+            .read<SettingsService>()
+            .markRomFolderSetupCompleted();
+      }
+      if (context.mounted) setState(() {});
+      return;
+    }
+
     await showDialog<bool>(
       context: context,
       barrierDismissible: false,
@@ -1051,12 +1271,15 @@ class _SettingsScreenState extends State<SettingsScreen>
     if (context.mounted) setState(() {});
   }
 
+  /// Add folder: on TV use HTTP upload; on phone use SAF; on desktop use FilePicker.
   Future<void> _addFolderFromSettings(
     BuildContext context,
     GameLibraryService library,
     void Function(void Function()) setState,
   ) async {
     List<String>? importedPaths;
+
+    // On TV, use HTTP upload instead of folder picker
     if (TvDetector.isTV) {
       final result = await showDialog<bool>(
         context: context,
@@ -1070,6 +1293,8 @@ class _SettingsScreenState extends State<SettingsScreen>
       }
       return;
     }
+
+    // Phone/tablet: use native SAF folder picker
     if (Platform.isAndroid) {
       try {
         final result = await _deviceChannel.invokeMethod<List<dynamic>>(
@@ -1083,6 +1308,8 @@ class _SettingsScreenState extends State<SettingsScreen>
     }
 
     if (!context.mounted) return;
+
+    // Android SAF: add each imported file
     if (importedPaths != null && importedPaths.isNotEmpty && context.mounted) {
       final addedGames = <GameRom>[];
       for (final path in importedPaths) {
@@ -1122,8 +1349,10 @@ class _SettingsScreenState extends State<SettingsScreen>
         );
       return;
     }
+
+    // Non-Android or FilePicker path (desktop, iOS)
     if (!Platform.isAndroid && context.mounted) {
-      final result = await FilePicker.platform.getDirectoryPath();
+      final result = await FilePicker.getDirectoryPath();
       if (!context.mounted) return;
       if (result != null) {
         await library.addRomDirectory(result);
@@ -1136,6 +1365,7 @@ class _SettingsScreenState extends State<SettingsScreen>
     }
   }
 
+  /// Fire-and-forget: download cover art for newly imported games.
   void _autoFetchCovers(
     BuildContext context,
     List<GameRom> games,
@@ -1160,9 +1390,8 @@ class _SettingsScreenState extends State<SettingsScreen>
     }();
   }
 
-  void _confirmReset(BuildContext context) {
+  void _confirmReset(BuildContext context, SettingsService settings) {
     final colors = AppColorTheme.of(context);
-    final settings = context.read<SettingsService>();
     showDialog(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -1202,6 +1431,7 @@ class _SettingsScreenState extends State<SettingsScreen>
         ],
       ),
     ).then((_) {
+      // Restore focus to settings list after dialog dismissal for TV
       if (mounted) _keyFocusNode.requestFocus();
     });
   }
@@ -1230,6 +1460,7 @@ class _SettingsScreenState extends State<SettingsScreen>
         appSaveDir: emulator.saveDir,
       ),
     ).then((_) {
+      // Restore focus to settings list after dialog dismissal for TV
       if (mounted) _keyFocusNode.requestFocus();
     });
   }
@@ -1253,6 +1484,9 @@ class _SettingsScreenState extends State<SettingsScreen>
 
     final zipPath = await SaveBackupService.pickZipFile();
     if (zipPath == null || !mounted) return;
+
+    // Use this.context after mounted check since the parameter context
+    // shouldn't be used after an async gap
     showDialog(
       context: this.context,
       barrierDismissible: false,
@@ -1262,6 +1496,7 @@ class _SettingsScreenState extends State<SettingsScreen>
         appSaveDir: emulator.saveDir,
       ),
     ).then((_) {
+      // Restore focus to settings list after dialog dismissal for TV
       if (mounted) _keyFocusNode.requestFocus();
     });
   }
@@ -1287,6 +1522,7 @@ class _SettingsScreenState extends State<SettingsScreen>
       builder: (ctx) =>
           _DriveBackupDialog(games: games, appSaveDir: emulator.saveDir),
     ).then((_) {
+      // Restore focus to settings list after dialog dismissal for TV
       if (mounted) _keyFocusNode.requestFocus();
     });
   }
@@ -1315,6 +1551,7 @@ class _SettingsScreenState extends State<SettingsScreen>
         appSaveDir: emulator.saveDir,
       ),
     ).then((_) {
+      // Restore focus to settings list after dialog dismissal for TV
       if (mounted) _keyFocusNode.requestFocus();
     });
   }
@@ -1350,6 +1587,7 @@ class _SettingsScreenState extends State<SettingsScreen>
   }
 }
 
+/// Collapsible accordion section for grouping related settings.
 class _CollapsibleSection extends StatefulWidget {
   final String title;
   final IconData icon;
@@ -1359,7 +1597,7 @@ class _CollapsibleSection extends StatefulWidget {
   const _CollapsibleSection({
     required this.title,
     required this.icon,
-    this.initiallyExpanded = false, 
+    this.initiallyExpanded = false, // ignore: unused_element_parameter
     required this.child,
   });
 
@@ -1450,7 +1688,7 @@ class _CollapsibleSectionState extends State<_CollapsibleSection>
           ),
           SizeTransition(
             sizeFactor: _expandAnimation,
-            axisAlignment: -1,
+            alignment: Alignment.topCenter,
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -1502,7 +1740,11 @@ class _SettingsCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: colors.surfaceLight, width: 1),
       ),
-      child: Column(children: children),
+      clipBehavior: Clip.antiAlias,
+      child: Material(
+        color: Colors.transparent,
+        child: Column(children: children),
+      ),
     );
   }
 }
@@ -1558,6 +1800,7 @@ class _SliderTile extends StatelessWidget {
   final double max;
   final int? divisions;
   final String labelSuffix;
+  final double labelMultiplier;
   final ValueChanged<double> onChanged;
 
   const _SliderTile({
@@ -1568,12 +1811,14 @@ class _SliderTile extends StatelessWidget {
     this.max = 1.0,
     this.divisions,
     this.labelSuffix = '',
+    this.labelMultiplier = 1.0,
     required this.onChanged,
   });
 
+  /// Step size for D-pad left/right adjustment.
   double get _step {
     if (divisions != null) return (max - min) / divisions!;
-    return (max - min) * 0.05; 
+    return (max - min) * 0.05; // 5% steps
   }
 
   void _increment() {
@@ -1596,12 +1841,14 @@ class _SliderTile extends StatelessWidget {
         }
         if (event.logicalKey == LogicalKeyboardKey.arrowRight ||
             event.logicalKey == LogicalKeyboardKey.gameButtonRight1) {
+          // At max → let the focus system handle it (navigate away)
           if ((value - max).abs() < 0.001) return KeyEventResult.ignored;
           _increment();
           return KeyEventResult.handled;
         }
         if (event.logicalKey == LogicalKeyboardKey.arrowLeft ||
             event.logicalKey == LogicalKeyboardKey.gameButtonLeft1) {
+          // At min → let the focus system handle it (navigate away)
           if ((value - min).abs() < 0.001) return KeyEventResult.ignored;
           _decrement();
           return KeyEventResult.handled;
@@ -1626,7 +1873,7 @@ class _SliderTile extends StatelessWidget {
                     ),
                   ),
                   Text(
-                    '${value.toStringAsFixed(1)}$labelSuffix',
+                    '${(value * labelMultiplier).toStringAsFixed(labelMultiplier > 1 ? 0 : 1)}$labelSuffix',
                     style: TextStyle(fontSize: 12, color: colors.accent),
                   ),
                 ],
@@ -1720,6 +1967,55 @@ class _InfoTile extends StatelessWidget {
           subtitle,
           style: TextStyle(fontSize: 12, color: colors.textMuted),
         ),
+      ),
+    );
+  }
+}
+
+/// "Auto Optimized" graphics tile — purely informational, like a console.
+///
+/// There is no mode picker: Auto Optimized chooses the best graphics for
+/// each system and device automatically (crisp scaling for 2D systems,
+/// enhanced resolution for 3D systems on capable phones/tablets,
+/// performance-first adaptive quality on Android TV). The only choice
+/// users get is the Authentic Pixel Mode toggle right below this tile.
+class _AutoOptimizedTile extends StatelessWidget {
+  final bool active;
+
+  const _AutoOptimizedTile({required this.active});
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColorTheme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      child: Row(
+        children: [
+          Icon(
+            Icons.auto_awesome,
+            color: active ? colors.accent : colors.textMuted,
+            size: 20,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Auto Optimized',
+                  style: TextStyle(fontSize: 14, color: colors.textPrimary),
+                ),
+                Text(
+                  active
+                      ? 'Best graphics for each system and device'
+                      : 'Off while Authentic Pixel Mode is on',
+                  style: TextStyle(fontSize: 12, color: colors.textMuted),
+                ),
+              ],
+            ),
+          ),
+          if (active) Icon(Icons.check_circle, color: colors.success, size: 20),
+        ],
       ),
     );
   }
@@ -1908,6 +2204,7 @@ class _ThemePicker extends StatelessWidget {
                   ),
                   child: Row(
                     children: [
+                      // Color swatch preview
                       Container(
                         width: 44,
                         height: 32,
@@ -1925,6 +2222,7 @@ class _ThemePicker extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(width: 14),
+                      // Name and color dots
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -1954,6 +2252,7 @@ class _ThemePicker extends StatelessWidget {
                           ],
                         ),
                       ),
+                      // Check mark
                       if (isSelected)
                         Icon(
                           Icons.check_circle,
@@ -1985,6 +2284,7 @@ class _ThemePicker extends StatelessWidget {
   }
 }
 
+/// Gamepad skin picker — horizontal chips with mini preview
 class _GamepadSkinTile extends StatelessWidget {
   final GamepadSkinType selected;
   final ValueChanged<GamepadSkinType> onChanged;
@@ -2038,6 +2338,7 @@ class _GamepadSkinTile extends StatelessWidget {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      // Mini preview: two small circles showing button style
                       Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
@@ -2109,6 +2410,10 @@ class _MiniButtonPreview extends StatelessWidget {
   }
 }
 
+// ─────────────────────────────────────────────────────────
+//  RetroAchievements account tile
+// ─────────────────────────────────────────────────────────
+
 class _RetroAchievementsTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
@@ -2158,7 +2463,7 @@ class _RetroAchievementsTile extends StatelessWidget {
                   ),
                 ),
                 subtitle: Text(
-                  '${profile?.totalPoints ?? 0} points',
+                  profile?.displaySummary ?? '0 points . 0 softcore points',
                   style: TextStyle(fontSize: 11, color: colors.textMuted),
                 ),
               ),
@@ -2211,8 +2516,11 @@ class _RetroAchievementsTile extends StatelessWidget {
             ],
           );
         }
+
+        // Not logged in — show error banner if login failed
         return _SettingsCard(
           children: [
+            // Error banner (invalid credentials, network failure, etc.)
             if (raService.lastError != null)
               Container(
                 width: double.infinity,
@@ -2305,6 +2613,11 @@ class _RetroAchievementsTile extends StatelessWidget {
   }
 }
 
+// ─────────────────────────────────────────────────────────
+//  Backup / Restore dialogs
+// ─────────────────────────────────────────────────────────
+
+/// Dialog that exports all saves to ZIP and offers Save / Share options.
 class _BackupProgressDialog extends StatefulWidget {
   final List<GameRom> games;
   final String? appSaveDir;
@@ -2330,6 +2643,7 @@ class _BackupProgressDialogState extends State<_BackupProgressDialog> {
 
   @override
   void dispose() {
+    // Clean up temp ZIP when the dialog is dismissed
     SaveBackupService.deleteTempZip(_zipPath);
     super.dispose();
   }
@@ -2508,6 +2822,7 @@ class _BackupProgressDialogState extends State<_BackupProgressDialog> {
   }
 }
 
+/// Dialog that previews a backup ZIP and lets the user confirm the import.
 class _ImportRestoreDialog extends StatefulWidget {
   final String zipPath;
   final List<GameRom> games;
@@ -2673,7 +2988,10 @@ class _ImportRestoreDialogState extends State<_ImportRestoreDialog> {
                   textAlign: TextAlign.center,
                 ),
               ),
+
+            // Preview section
             if (showPreview) ...[
+              // ZIP info
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
@@ -2730,13 +3048,15 @@ class _ImportRestoreDialogState extends State<_ImportRestoreDialog> {
               ),
 
               const SizedBox(height: 10),
+
+              // Game list
               if (preview.matchedGames.isNotEmpty)
                 ConstrainedBox(
                   constraints: const BoxConstraints(maxHeight: 200),
                   child: ListView.separated(
                     shrinkWrap: true,
                     itemCount: preview.matchedGames.length,
-                    separatorBuilder: (_, __) =>
+                    separatorBuilder: (_, _) =>
                         Divider(height: 1, color: colors.surfaceLight),
                     itemBuilder: (context, index) {
                       final entry = preview.matchedGames.entries.elementAt(
@@ -2744,6 +3064,8 @@ class _ImportRestoreDialogState extends State<_ImportRestoreDialog> {
                       );
                       final gameName = entry.key;
                       final files = entry.value;
+
+                      // Categorize files
                       final hasSram = files.any((f) => f.endsWith('.sav'));
                       final stateCount = files
                           .where((f) => RegExp(r'\.ss\d$').hasMatch(f))
@@ -2811,6 +3133,8 @@ class _ImportRestoreDialogState extends State<_ImportRestoreDialog> {
                 ),
 
               const SizedBox(height: 8),
+
+              // Warning
               Container(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 10,
@@ -2848,6 +3172,7 @@ class _ImportRestoreDialogState extends State<_ImportRestoreDialog> {
         ),
       ),
       actions: [
+        // Restore button (only shown during preview)
         if (showPreview && preview.matchedFileCount > 0)
           TvFocusable(
             onTap: _restore,
@@ -2858,6 +3183,7 @@ class _ImportRestoreDialogState extends State<_ImportRestoreDialog> {
               onPressed: _restore,
             ),
           ),
+        // Close / Cancel
         TvFocusable(
           onTap: _restoring ? null : () => Navigator.pop(context),
           borderRadius: BorderRadius.circular(8),
@@ -2874,6 +3200,7 @@ class _ImportRestoreDialogState extends State<_ImportRestoreDialog> {
   }
 }
 
+/// Dialog that handles Google Drive backup (sign in → export → upload).
 class _DriveBackupDialog extends StatefulWidget {
   final List<GameRom> games;
   final String? appSaveDir;
@@ -2897,6 +3224,7 @@ class _DriveBackupDialogState extends State<_DriveBackupDialog> {
 
   Future<void> _run() async {
     try {
+      // Step 1: Sign in
       final signedIn = await SaveBackupService.googleSignIn();
       if (!signedIn) {
         if (mounted) {
@@ -2910,6 +3238,8 @@ class _DriveBackupDialogState extends State<_DriveBackupDialog> {
         }
         return;
       }
+
+      // Step 2: Export to ZIP
       if (mounted) setState(() => _status = 'Creating backup ZIP…');
       final zipPath = await SaveBackupService.exportAllSaves(
         games: widget.games,
@@ -2925,6 +3255,8 @@ class _DriveBackupDialogState extends State<_DriveBackupDialog> {
         }
         return;
       }
+
+      // Step 3: Upload to Drive
       if (mounted) setState(() => _status = 'Uploading to Google Drive…');
       final fileId = await SaveBackupService.uploadToDrive(zipPath);
 
@@ -2941,6 +3273,8 @@ class _DriveBackupDialogState extends State<_DriveBackupDialog> {
           }
         });
       }
+
+      // Clean up temp ZIP
       try {
         File(zipPath).deleteSync();
       } catch (e) {
@@ -3020,6 +3354,7 @@ class _DriveBackupDialogState extends State<_DriveBackupDialog> {
   }
 }
 
+/// Dialog that lists Drive backups and lets user pick one to restore.
 class _DriveRestoreDialog extends StatefulWidget {
   final List<GameRom> games;
   final String? appSaveDir;
@@ -3108,6 +3443,8 @@ class _DriveRestoreDialogState extends State<_DriveRestoreDialog> {
         games: widget.games,
         appSaveDir: widget.appSaveDir,
       );
+
+      // Clean up temp file
       try {
         File(zipPath).deleteSync();
       } catch (e) {
@@ -3242,6 +3579,258 @@ class _DriveRestoreDialogState extends State<_DriveRestoreDialog> {
           ),
         ),
       ],
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  BIOS tab — per-platform section
+// ═══════════════════════════════════════════════════════════════════════
+
+class _BiosPlatformSection extends StatefulWidget {
+  final GamePlatform platform;
+  final BiosService biosService;
+  final String title;
+  final String subtitle;
+  final bool autofocus;
+
+  const _BiosPlatformSection({
+    required this.platform,
+    required this.biosService,
+    required this.title,
+    required this.subtitle,
+    this.autofocus = false,
+  });
+
+  @override
+  State<_BiosPlatformSection> createState() => _BiosPlatformSectionState();
+}
+
+class _BiosPlatformSectionState extends State<_BiosPlatformSection> {
+  late Future<List<BiosFileStatus>> _statusFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+  }
+
+  void _refresh() {
+    setState(() {
+      _statusFuture = widget.biosService.listBios(widget.platform);
+    });
+  }
+
+  Future<String?> _pickBiosSourcePath() async {
+    if (Platform.isAndroid) {
+      try {
+        final path = await _deviceChannel.invokeMethod<String>('pickBiosFile');
+        if (path != null) return path;
+      } catch (e) {
+        debugPrint('SettingsScreen: native BIOS picker failed — $e');
+      }
+    }
+
+    final result = await FilePicker.pickFile(type: FileType.any);
+    return result?.path;
+  }
+
+  Future<void> _pickAndImport(BiosSpec spec) async {
+    final sourcePath = await _pickBiosSourcePath();
+    if (sourcePath == null) return;
+    final ok = await widget.biosService.importBiosFile(
+      platform: widget.platform,
+      biosId: spec.id,
+      sourcePath: sourcePath,
+    );
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger
+      ..clearSnackBars()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            ok != null
+                ? 'Imported ${spec.label} as ${spec.filename}'
+                : 'Failed to import ${spec.label}',
+          ),
+        ),
+      );
+    _refresh();
+  }
+
+  Future<void> _delete(BiosSpec spec) async {
+    await widget.biosService.deleteBios(
+      platform: widget.platform,
+      biosId: spec.id,
+    );
+    if (!mounted) return;
+    _refresh();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColorTheme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _SectionHeader(title: widget.title),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          child: Text(
+            widget.subtitle,
+            style: TextStyle(
+              fontSize: 12,
+              color: colors.textMuted,
+              height: 1.4,
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        FutureBuilder<List<BiosFileStatus>>(
+          future: _statusFuture,
+          builder: (context, snapshot) {
+            final statuses = snapshot.data ?? const <BiosFileStatus>[];
+            return _SettingsCard(
+              children: [
+                for (var i = 0; i < statuses.length; i++) ...[
+                  if (i > 0) const Divider(height: 1),
+                  _BiosFileTile(
+                    status: statuses[i],
+                    autofocus: widget.autofocus && i == 0,
+                    onImport: () => _pickAndImport(statuses[i].spec),
+                    onDelete: statuses[i].spec.kind == BiosKind.bundled
+                        ? null
+                        : () => _delete(statuses[i].spec),
+                  ),
+                ],
+                if (statuses.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Text(
+                      'No BIOS files defined.',
+                      style: TextStyle(color: colors.textMuted),
+                    ),
+                  ),
+              ],
+            );
+          },
+        ),
+      ],
+    );
+  }
+}
+
+class _BiosFileTile extends StatelessWidget {
+  final BiosFileStatus status;
+  final VoidCallback onImport;
+  final VoidCallback? onDelete;
+  final bool autofocus;
+
+  const _BiosFileTile({
+    required this.status,
+    required this.onImport,
+    required this.onDelete,
+    this.autofocus = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColorTheme.of(context);
+    final spec = status.spec;
+    final IconData icon;
+    final Color iconColor;
+    final String statusText;
+    if (!status.exists) {
+      icon = Icons.remove_circle_outline;
+      iconColor = colors.textMuted;
+      statusText = spec.kind == BiosKind.bundled
+          ? 'Will deploy on first launch'
+          : 'Missing';
+    } else if (status.valid) {
+      icon = Icons.check_circle;
+      iconColor = colors.success;
+      statusText = spec.kind == BiosKind.bundled ? 'Bundled · active' : 'OK';
+    } else {
+      icon = Icons.error_outline;
+      iconColor = colors.warning;
+      statusText = status.hashChecked
+          ? 'Hash mismatch'
+          : 'Invalid · ${status.actualSize} B';
+    }
+    return TvFocusable(
+      autofocus: autofocus,
+      onTap: onImport,
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
+          children: [
+            Icon(icon, color: iconColor, size: 22),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          spec.label,
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: colors.textPrimary,
+                          ),
+                        ),
+                      ),
+                      Text(
+                        statusText,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: iconColor,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '${spec.filename} · ${spec.description}',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: colors.textMuted,
+                      height: 1.3,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (onDelete != null && status.exists) ...[
+              const SizedBox(width: 4),
+              IconButton(
+                tooltip: 'Delete ${spec.filename}',
+                icon: Icon(
+                  Icons.delete_outline,
+                  size: 20,
+                  color: colors.textMuted,
+                ),
+                onPressed: onDelete,
+              ),
+            ],
+            const SizedBox(width: 4),
+            Icon(
+              spec.kind == BiosKind.bundled
+                  ? Icons.lock_outline
+                  : Icons.upload_file,
+              size: 18,
+              color: spec.kind == BiosKind.bundled
+                  ? colors.textMuted
+                  : colors.accent,
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

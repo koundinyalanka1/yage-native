@@ -1,4 +1,17 @@
+/*
+ * YAGE Core Variables Module
+ * 
+ * Handles libretro core option storage and retrieval.
+ * Cores like Mupen64Plus-Next depend on storing core variables so
+ * GET_VARIABLE can return values during retro_run.
+ */
+
 #include "yage_internal.h"
+
+/* ── Local struct definitions (minimal subset for parsing) ────────────────
+ * These match the libretro spec for core option storage.
+ * Shared types are defined in yage_libretro.c; this module uses local
+ * declarations to avoid redefinition conflicts when linking. */
 
 struct cv_retro_variable {
     const char *key;
@@ -49,6 +62,9 @@ void core_vars_set(const char* key, const char* value) {
         if (strcmp(g_core_vars[i].key, key) == 0) {
             snprintf(g_core_vars[i].value, MAX_VAR_VAL_LEN, "%s", value);
             options_ui_set_value(key, value);
+            if (strstr(key, "opengl") || strstr(key, "renderer")) {
+                LOGI("core_vars_set: updated key=%s -> \"%s\"", key, value);
+            }
             return;
         }
     }
@@ -57,6 +73,9 @@ void core_vars_set(const char* key, const char* value) {
         snprintf(g_core_vars[g_core_vars_count].value, MAX_VAR_VAL_LEN, "%s", value);
         g_core_vars_count++;
         options_ui_set_from_retro_variable(key, value);
+        if (strstr(key, "opengl") || strstr(key, "renderer")) {
+            LOGI("core_vars_set: inserted key=%s -> \"%s\"", key, value);
+        }
     }
 }
 
@@ -70,6 +89,8 @@ const char* core_vars_get(const char* key) {
     return NULL;
 }
 
+/* Parse SET_VARIABLES (cmd 16) — value format: "Description; opt1|opt2|opt3"
+ * First option after the semicolon is the default. */
 void core_vars_parse_set_variables(const void* vars_raw) {
     if (!vars_raw) return;
     options_ui_clear();
@@ -87,6 +108,10 @@ void core_vars_parse_set_variables(const void* vars_raw) {
         if (len >= MAX_VAR_VAL_LEN) len = MAX_VAR_VAL_LEN - 1;
         memcpy(def, semi, len);
         def[len] = '\0';
+        /* Log keys that may affect renderer selection. */
+        if (strstr(vars->key, "opengl") || strstr(vars->key, "renderer")) {
+            LOGI("SET_VARIABLES: key=%s default=\"%s\"", vars->key, def);
+        }
         core_vars_set(vars->key, def);
     }
 }
